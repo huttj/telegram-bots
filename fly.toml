@@ -1,25 +1,26 @@
-# fly.toml app configuration file generated for voice-journal on 2026-01-11
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# fly.toml app configuration file
+# Generated for voice-journal
 
 app = "voice-journal"
 primary_region = "iad"
 
 [build]
 
-[http_service]
-  internal_port = 3000
-  force_https = true
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ["app"]
-
-[[vm]]
-  memory = '256mb'
-  cpu_kind = 'shared'
-  cpus = 1
+[env]
+  PORT = "3000"
 
 [mounts]
   source = "voice_journal_data"
   destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
