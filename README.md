@@ -6,8 +6,10 @@ A Telegram bot that automatically transcribes voice messages and saves them with
 
 - **Voice Transcription**: Automatically transcribe voice messages using Groq's Whisper API (free tier available)
 - **Cloud Storage**: Store original voice files in Cloudflare R2
+- **Automatic Backups**: Continuous database backup to R2 using Litestream (real-time replication)
 - **User Authentication**: Hard-coded user ID authorization for privacy
 - **Durable Storage**: SQLite database for transcripts with timestamps
+- **Easy Data Access**: Sync all your data to local computer with rclone
 - **Auto-Deploy**: GitHub Actions workflow for automatic deployment to Fly.io
 
 ## Setup Instructions
@@ -130,9 +132,9 @@ Once deployed, message your bot on Telegram:
 - **`/stats`**: See how many voice notes you've recorded and total duration
 
 The bot will react with:
-- 👂 When it starts processing
-- ✅ When successfully transcribed and saved
-- ❌ If an error occurred
+- 👀 When it starts processing
+- 👍 When successfully transcribed and saved
+- 👎 If an error occurred
 
 ## Database Schema
 
@@ -150,30 +152,125 @@ CREATE TABLE transcripts (
 )
 ```
 
+## Automatic Database Backups with Litestream
+
+The bot includes **Litestream** for automatic, continuous database backups to R2. When R2 credentials are configured, your database is backed up in near real-time (every 10 seconds when changes occur).
+
+### How it works:
+- Litestream continuously monitors the SQLite database
+- Changes are streamed to R2 at `voice-journal/db/`
+- Snapshots are kept for 7 days with hourly validation
+- On startup, if no local database exists, it automatically restores from R2
+- All data (voice files + database) is stored in R2 under `voice-journal/`
+
+### R2 Structure:
+```
+voice-journal/           (R2 bucket root)
+  voice-notes/           (voice files)
+    1234567890-123.ogg
+  db/                    (database backups)
+    generations/
+    snapshots/
+    wal/
+```
+
+### Sync R2 to Your Computer (Auto-backup to local)
+
+Use **rclone** to sync all your data from R2 to your local computer:
+
+#### One-time setup:
+```bash
+# Install rclone
+curl https://rclone.org/install.sh | sudo bash
+
+# Configure rclone for Cloudflare R2
+rclone config create r2 s3 \
+  provider Cloudflare \
+  access_key_id YOUR_R2_ACCESS_KEY \
+  secret_access_key YOUR_R2_SECRET_KEY \
+  endpoint https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+```
+
+#### Sync to local folder:
+```bash
+# Sync everything (voice files + database backups)
+rclone sync r2:voice-journal ~/voice-journal-backup
+
+# Or just sync voice notes
+rclone sync r2:voice-journal/voice-notes ~/voice-journal-backup/voice-notes
+```
+
+#### Set up automatic daily sync (cron):
+```bash
+# Edit crontab
+crontab -e
+
+# Add this line to sync every day at 2am:
+0 2 * * * rclone sync r2:voice-journal ~/voice-journal-backup
+```
+
+Now your computer will automatically have a daily backup of everything!
+
 ## Data Export
 
 To export your data:
 
-### Option 1: Download database from Fly.io
+### Option 1: Restore database from Litestream backup (Recommended)
+
+If you have Litestream backups in R2, you can restore the database locally:
 
 ```bash
-# SSH into your Fly.io machine
-flyctl ssh console
+# Install Litestream locally
+# On macOS:
+brew install litestream
 
-# Download the database
+# On Linux:
+wget https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz
+tar -xzf litestream-v0.3.13-linux-amd64.tar.gz
+sudo mv litestream /usr/local/bin/
+
+# Restore database from R2
+litestream restore \
+  -replica s3 \
+  -endpoint https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com \
+  -access-key-id YOUR_ACCESS_KEY \
+  -secret-access-key YOUR_SECRET_KEY \
+  voice-journal.db
+```
+
+Or use rclone to sync the database (see above section).
+
+### Option 2: Download database directly from Fly.io
+
+```bash
+# Download the database using SFTP
 flyctl ssh sftp get /data/voice-journal.db ./voice-journal.db
 ```
 
-### Option 2: Query the database locally
+### Option 3: Query and export transcripts
 
 ```bash
-# After downloading the database
-sqlite3 voice-journal.db "SELECT * FROM transcripts ORDER BY created_at DESC" > transcripts.csv
+# Export all transcripts to CSV
+sqlite3 voice-journal.db -csv -header "SELECT
+  datetime(created_at, 'unixepoch') as timestamp,
+  duration,
+  transcript,
+  r2_key
+FROM transcripts ORDER BY created_at" > transcripts.csv
+
+# Export to JSON
+sqlite3 voice-journal.db "SELECT json_group_array(json_object(
+  'id', id,
+  'timestamp', datetime(created_at, 'unixepoch'),
+  'duration', duration,
+  'transcript', transcript,
+  'r2_key', r2_key
+)) FROM transcripts" > transcripts.json
 ```
 
-### Option 3: Download voice files from R2
+### Option 4: Download voice files from R2
 
-Use the [Cloudflare R2 dashboard](https://dash.cloudflare.com/) or [rclone](https://rclone.org/) to bulk download voice files.
+Use rclone (see "Sync R2 to Your Computer" section above) or the [Cloudflare R2 dashboard](https://dash.cloudflare.com/).
 
 ## Cost Estimate
 
@@ -191,13 +288,16 @@ User → Telegram Bot → Voice Message
                  ↓
          Download to temp file
                  ↓
-         Upload to Cloudflare R2
+         Upload to Cloudflare R2 (voice-journal/voice-notes/)
                  ↓
          Transcribe with Groq Whisper
                  ↓
-         Save to SQLite database
+         Save to SQLite database → Litestream → R2 (voice-journal/db/)
                  ↓
-         React with ✅
+         React with 👍
+
+
+Optional: Local Computer ← rclone sync ← R2 (automatic backup)
 ```
 
 ## Future Features (TODO)
@@ -205,7 +305,6 @@ User → Telegram Bot → Voice Message
 - Text query support with AI-powered search
 - Date range filtering (today, this week, etc.)
 - Vector search for semantic queries
-- Export command (`/export`) to download all data
 - Multi-language support
 - Tastemaker bot (separate bot for saving links and media)
 

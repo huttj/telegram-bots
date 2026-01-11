@@ -158,7 +158,7 @@ bot.on('voice', async (ctx) => {
     const tempFilePath = await downloadTelegramFile(voice.file_id);
 
     // Upload to R2
-    const r2Key = `voice-notes/${timestamp}-${messageId}.ogg`;
+    const r2Key = `voice-journal/voice-notes/${timestamp}-${messageId}.ogg`;
     const uploadedKey = await uploadToR2(tempFilePath, r2Key);
 
     // Transcribe with Groq
