@@ -151,7 +151,7 @@ bot.on('voice', async (ctx) => {
 
   try {
     // React to show we're processing
-    await ctx.react('👂');
+    await ctx.react('👀');
 
     // Download voice file from Telegram
     console.log('Downloading voice file...');
@@ -177,12 +177,12 @@ bot.on('voice', async (ctx) => {
     unlinkSync(tempFilePath);
 
     // React with success
-    await ctx.react('✅');
+    await ctx.react('👍');
 
     console.log(`✓ Successfully processed voice message ${messageId}`);
   } catch (error) {
     console.error('Error processing voice message:', error);
-    await ctx.react('❌');
+    await ctx.react('👎');
   }
 });
 
