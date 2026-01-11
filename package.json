@@ -1,0 +1,21 @@
+{
+  "name": "telegram-voice-journal",
+  "version": "1.0.0",
+  "description": "A Telegram bot for voice journaling with automatic transcription",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": ["telegram", "bot", "voice", "journal", "whisper"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "@aws-sdk/client-s3": "^3.701.0",
+    "groq-sdk": "^0.8.0",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.5"
+  }
+}
