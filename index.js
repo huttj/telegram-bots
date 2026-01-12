@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import https from 'https';
 import http from 'http';
 import { embed } from './embeddings.js';
+import { startAdminServer } from './admin-server.js';
 
 // Load environment variables
 config();
@@ -701,6 +702,9 @@ bot.command('stats', (ctx) => {
   const formattedDuration = formatDuration(stats.total_duration || 0);
   ctx.reply(`📊 Stats:\n\nTotal voice notes: ${stats.count}\nTotal duration: ${formattedDuration}`);
 });
+
+// Start the admin server
+startAdminServer().catch(err => console.error('Failed to start admin server:', err));
 
 // Start the bot
 console.log('Starting Voice Journal Bot...');

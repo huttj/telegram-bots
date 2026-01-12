@@ -26,8 +26,9 @@ COPY litestream.yml /etc/litestream.yml
 # Create directory for database
 RUN mkdir -p /data
 
-# Expose port
+# Expose ports
 EXPOSE 3000
+EXPOSE 80
 
 # Start both Litestream and the bot
 CMD ["sh", "start.sh"]
