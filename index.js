@@ -192,6 +192,18 @@ function formatTimestamp(unixTimestamp) {
   return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }
 
+// Helper: Format duration as "1m 3s" or "55s"
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  } else {
+    return `${remainingSeconds}s`;
+  }
+}
+
 // Helper: Transcribe audio with Groq Whisper
 async function transcribeAudio(filePath) {
   if (!groq) {
@@ -461,8 +473,8 @@ async function vectorSearch(queryText, topK = 5, dateFilter = null) {
 async function generateResponse(userQuery, relevantTranscripts) {
   // Format transcripts for context
   const context = relevantTranscripts.map((t, i) => {
-    const date = new Date(t.created_at * 1000).toLocaleString();
-    return `[${i + 1}] ${date} (${t.duration}s):\n${t.transcript}`;
+    const date = new Date(t.created_at * 1000).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+    return `[${i + 1}] ${date} (${formatDuration(t.duration)}):\n${t.transcript}`;
   }).join('\n\n');
 
   const prompt = `You are a helpful assistant for a voice journal system. The user asked: "${userQuery}"
@@ -485,9 +497,9 @@ Provide a brief, concise response (2-3 sentences max). Summarize key points and 
 
     // Add sources at the bottom
     const sourcesList = relevantTranscripts.map((t, i) => {
-      const date = new Date(t.created_at * 1000).toLocaleDateString();
-      const time = new Date(t.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return `${i + 1}. ${date} at ${time} (${t.duration}s)`;
+      const date = new Date(t.created_at * 1000).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
+      const time = new Date(t.created_at * 1000).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' });
+      return `${i + 1}. ${date} at ${time} (${formatDuration(t.duration)})`;
     }).join('\n');
 
     return `${llmResponse}\n\n---\n📎 Sources (${relevantTranscripts.length}):\n${sourcesList}`;
@@ -666,8 +678,8 @@ bot.command('start', (ctx) => {
 // Handle stats command
 bot.command('stats', (ctx) => {
   const stats = db.prepare('SELECT COUNT(*) as count, SUM(duration) as total_duration FROM transcripts').get();
-  const totalMinutes = Math.round((stats.total_duration || 0) / 60);
-  ctx.reply(`📊 Stats:\n\nTotal voice notes: ${stats.count}\nTotal duration: ${totalMinutes} minutes`);
+  const formattedDuration = formatDuration(stats.total_duration || 0);
+  ctx.reply(`📊 Stats:\n\nTotal voice notes: ${stats.count}\nTotal duration: ${formattedDuration}`);
 });
 
 // Start the bot
