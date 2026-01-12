@@ -8,6 +8,7 @@ import { pipeline } from 'stream/promises';
 import { randomUUID } from 'crypto';
 import https from 'https';
 import http from 'http';
+import { embeddings } from 'embeddings';
 
 // Load environment variables
 config();
@@ -41,7 +42,8 @@ db.exec(`
     r2_key TEXT,
     transcript TEXT,
     created_at INTEGER,
-    duration INTEGER
+    duration INTEGER,
+    embedding BLOB
   )
 `);
 
@@ -63,6 +65,19 @@ if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
 
 // Initialize Groq client
 const groq = new Groq({ apiKey: GROQ_API_KEY });
+
+// Initialize embedding model
+let embeddingModel = null;
+console.log('Initializing embedding model...');
+embeddings('Xenova/all-MiniLM-L6-v2').then(async model => {
+  embeddingModel = model;
+  console.log('✓ Embedding model initialized (384 dimensions)');
+
+  // Backfill embeddings for existing transcripts
+  await backfillEmbeddings();
+}).catch(err => {
+  console.error('Failed to initialize embedding model:', err);
+});
 
 // Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
@@ -153,6 +168,203 @@ async function transcribeAudio(filePath) {
   }
 }
 
+// Helper: Generate embedding for text
+async function generateEmbedding(text) {
+  if (!embeddingModel) {
+    throw new Error('Embedding model not initialized');
+  }
+  const embedding = await embeddingModel.embed(text);
+  return embedding;
+}
+
+// Helper: Calculate cosine similarity between two vectors
+function cosineSimilarity(vecA, vecB) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Helper: Convert embedding array to buffer for storage
+function embeddingToBuffer(embedding) {
+  const buffer = Buffer.allocUnsafe(embedding.length * 4);
+  for (let i = 0; i < embedding.length; i++) {
+    buffer.writeFloatLE(embedding[i], i * 4);
+  }
+  return buffer;
+}
+
+// Helper: Convert buffer to embedding array
+function bufferToEmbedding(buffer) {
+  const embedding = [];
+  for (let i = 0; i < buffer.length; i += 4) {
+    embedding.push(buffer.readFloatLE(i));
+  }
+  return embedding;
+}
+
+// Helper: Classify query and extract search parameters using small LLM
+async function classifyQuery(userQuery) {
+  const prompt = `You are a query classifier for a voice journal system. Analyze the user's query and determine:
+1. The query type: "today", "week", "month", or "semantic" (for semantic search)
+2. For semantic searches, extract the key search terms
+
+User query: "${userQuery}"
+
+Respond ONLY with a JSON object in this exact format:
+{
+  "type": "today|week|month|semantic",
+  "searchTerms": "extracted search terms for semantic search (empty for time-based queries)"
+}`;
+
+  try {
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+      max_tokens: 200,
+    });
+
+    const content = response.choices[0].message.content.trim();
+    // Extract JSON from response (handles markdown code blocks)
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Failed to parse classification response');
+    }
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    console.error('Error classifying query:', error);
+    // Default to semantic search if classification fails
+    return { type: 'semantic', searchTerms: userQuery };
+  }
+}
+
+// Helper: Get transcripts from today
+function getTranscriptsToday() {
+  const todayStart = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
+  const stmt = db.prepare('SELECT * FROM transcripts WHERE created_at >= ? ORDER BY created_at DESC');
+  return stmt.all(todayStart);
+}
+
+// Helper: Get transcripts from this week
+function getTranscriptsThisWeek() {
+  const now = new Date();
+  const weekStart = new Date(now.setDate(now.getDate() - now.getDay()));
+  weekStart.setHours(0, 0, 0, 0);
+  const weekStartTimestamp = Math.floor(weekStart.getTime() / 1000);
+
+  const stmt = db.prepare('SELECT * FROM transcripts WHERE created_at >= ? ORDER BY created_at DESC');
+  return stmt.all(weekStartTimestamp);
+}
+
+// Helper: Get transcripts from this month
+function getTranscriptsThisMonth() {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStartTimestamp = Math.floor(monthStart.getTime() / 1000);
+
+  const stmt = db.prepare('SELECT * FROM transcripts WHERE created_at >= ? ORDER BY created_at DESC');
+  return stmt.all(monthStartTimestamp);
+}
+
+// Helper: Perform vector similarity search
+async function vectorSearch(queryText, topK = 5) {
+  if (!embeddingModel) {
+    throw new Error('Embedding model not initialized');
+  }
+
+  // Generate embedding for query
+  const queryEmbedding = await generateEmbedding(queryText);
+
+  // Get all transcripts with embeddings
+  const stmt = db.prepare('SELECT * FROM transcripts WHERE embedding IS NOT NULL');
+  const transcripts = stmt.all();
+
+  // Calculate similarity scores
+  const results = transcripts.map(transcript => {
+    const transcriptEmbedding = bufferToEmbedding(transcript.embedding);
+    const similarity = cosineSimilarity(queryEmbedding, transcriptEmbedding);
+    return { ...transcript, similarity };
+  });
+
+  // Sort by similarity and return top K
+  return results.sort((a, b) => b.similarity - a.similarity).slice(0, topK);
+}
+
+// Helper: Generate response using medium LLM
+async function generateResponse(userQuery, relevantTranscripts) {
+  // Format transcripts for context
+  const context = relevantTranscripts.map((t, i) => {
+    const date = new Date(t.created_at * 1000).toLocaleString();
+    return `[${i + 1}] ${date} (${t.duration}s):\n${t.transcript}`;
+  }).join('\n\n');
+
+  const prompt = `You are a helpful assistant for a voice journal system. The user asked: "${userQuery}"
+
+Here are the relevant voice journal entries:
+
+${context}
+
+Based on these entries, provide a helpful and conversational response to the user's query. Summarize key points, identify patterns, and answer their question directly. If the entries don't contain relevant information, say so politely.`;
+
+  try {
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+
+    return response.choices[0].message.content;
+  } catch (error) {
+    console.error('Error generating response:', error);
+    throw error;
+  }
+}
+
+// Helper: Backfill embeddings for existing transcripts
+async function backfillEmbeddings() {
+  if (!embeddingModel) {
+    console.log('Embedding model not ready, skipping backfill');
+    return;
+  }
+
+  try {
+    const stmt = db.prepare('SELECT id, transcript FROM transcripts WHERE embedding IS NULL');
+    const transcriptsWithoutEmbeddings = stmt.all();
+
+    if (transcriptsWithoutEmbeddings.length === 0) {
+      console.log('✓ All transcripts already have embeddings');
+      return;
+    }
+
+    console.log(`Backfilling embeddings for ${transcriptsWithoutEmbeddings.length} transcripts...`);
+
+    const updateStmt = db.prepare('UPDATE transcripts SET embedding = ? WHERE id = ?');
+
+    for (const transcript of transcriptsWithoutEmbeddings) {
+      try {
+        const embedding = await generateEmbedding(transcript.transcript);
+        const embeddingBuffer = embeddingToBuffer(embedding);
+        updateStmt.run(embeddingBuffer, transcript.id);
+      } catch (error) {
+        console.error(`Error generating embedding for transcript ${transcript.id}:`, error);
+      }
+    }
+
+    console.log(`✓ Backfilled embeddings for ${transcriptsWithoutEmbeddings.length} transcripts`);
+  } catch (error) {
+    console.error('Error backfilling embeddings:', error);
+  }
+}
+
 // Handle voice messages
 bot.on('voice', async (ctx) => {
   const voice = ctx.message.voice;
@@ -179,12 +391,24 @@ bot.on('voice', async (ctx) => {
     const transcript = await transcribeAudio(tempFilePath);
     console.log(`Transcript: ${transcript.substring(0, 100)}...`);
 
+    // Generate embedding for transcript
+    let embeddingBuffer = null;
+    if (embeddingModel) {
+      try {
+        console.log('Generating embedding...');
+        const embedding = await generateEmbedding(transcript);
+        embeddingBuffer = embeddingToBuffer(embedding);
+      } catch (error) {
+        console.error('Error generating embedding:', error);
+      }
+    }
+
     // Save to database
     const stmt = db.prepare(`
-      INSERT INTO transcripts (message_id, voice_file_id, r2_key, transcript, created_at, duration)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO transcripts (message_id, voice_file_id, r2_key, transcript, created_at, duration, embedding)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(messageId, voice.file_id, uploadedKey, transcript, timestamp, voice.duration);
+    stmt.run(messageId, voice.file_id, uploadedKey, transcript, timestamp, voice.duration, embeddingBuffer);
 
     // Clean up temp file
     unlinkSync(tempFilePath);
@@ -199,9 +423,74 @@ bot.on('voice', async (ctx) => {
   }
 });
 
+// Handle text messages (queries)
+bot.on('text', async (ctx) => {
+  // Skip if it's a command
+  if (ctx.message.text.startsWith('/')) {
+    return;
+  }
+
+  const userQuery = ctx.message.text;
+  console.log(`Received query: ${userQuery}`);
+
+  try {
+    // React to show we're processing
+    await ctx.react('🤔');
+
+    // Check if embedding model is ready
+    if (!embeddingModel) {
+      await ctx.reply('⚠️ The embedding model is still initializing. Please try again in a moment.');
+      return;
+    }
+
+    // Step 1: Classify query using small LLM
+    console.log('Classifying query...');
+    const classification = await classifyQuery(userQuery);
+    console.log(`Query classified as: ${classification.type}`);
+
+    // Step 2: Retrieve relevant transcripts based on query type
+    let relevantTranscripts = [];
+
+    if (classification.type === 'today') {
+      relevantTranscripts = getTranscriptsToday();
+    } else if (classification.type === 'week') {
+      relevantTranscripts = getTranscriptsThisWeek();
+    } else if (classification.type === 'month') {
+      relevantTranscripts = getTranscriptsThisMonth();
+    } else {
+      // Semantic search
+      const searchTerms = classification.searchTerms || userQuery;
+      console.log(`Performing vector search for: ${searchTerms}`);
+      relevantTranscripts = await vectorSearch(searchTerms, 5);
+    }
+
+    console.log(`Found ${relevantTranscripts.length} relevant transcripts`);
+
+    if (relevantTranscripts.length === 0) {
+      await ctx.reply('I couldn\'t find any relevant voice notes for your query. Try recording some voice notes first!');
+      await ctx.react('🤷');
+      return;
+    }
+
+    // Step 3: Generate response using medium LLM
+    console.log('Generating response...');
+    const response = await generateResponse(userQuery, relevantTranscripts);
+
+    // Send response to user
+    await ctx.reply(response);
+    await ctx.react('✅');
+
+    console.log('✓ Query processed successfully');
+  } catch (error) {
+    console.error('Error processing query:', error);
+    await ctx.reply('Sorry, I encountered an error processing your query. Please try again.');
+    await ctx.react('❌');
+  }
+});
+
 // Handle start command
 bot.command('start', (ctx) => {
-  ctx.reply('🎙 Voice Journal Bot\n\nSend me voice notes and I\'ll transcribe and save them for you!');
+  ctx.reply('🎙 Voice Journal Bot\n\nSend me voice notes and I\'ll transcribe and save them for you!\n\nYou can also send text messages to query your voice notes. Ask about today\'s notes, this week, or search for specific topics!');
 });
 
 // Handle stats command
