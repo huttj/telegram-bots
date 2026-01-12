@@ -269,32 +269,37 @@ function bufferToEmbedding(buffer) {
 
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
-  const prompt = `You are a query classifier for a voice journal system. Analyze the user's query and determine:
-1. The query type: "today", "week", "month", "year", "semantic" (for semantic search), or "range" (for specific date ranges)
-2. For semantic searches, extract the key search terms
-3. For any query, extract an optional date filter if mentioned
+  const prompt = `Classify this voice journal query. FIRST check if it mentions a time period, THEN consider if it's a semantic search.
 
 User query: "${userQuery}"
 
-Date filter format examples:
-- "this_year" - current year
-- "this_month" - current month
-- "this_week" - current week
-- "2024" - specific year
-- "2022-2025" - year range
-- "last_year" - previous year
-- null - no filter (search all time)
+STEP 1 - Check for time references (HIGHEST PRIORITY):
+- "today" → type: "today"
+- "this week" / "week" → type: "week"
+- "this month" / "month" → type: "month"
+- "this year" / "year" → type: "year"
 
-Respond ONLY with a JSON object in this exact format:
+If ANY time reference is found, use that type. Ignore other words in the query.
+
+STEP 2 - If NO time reference, it's a semantic search:
+- type: "semantic"
+- Extract the main topic/keywords to searchTerms
+
+Examples:
+"What did I say today?" → type: "today"
+"Show me advice from my journal entry today" → type: "today"
+"What did I talk about coffee?" → type: "semantic", searchTerms: "coffee"
+
+Respond ONLY with JSON:
 {
-  "type": "today|week|month|year|semantic|range",
-  "searchTerms": "extracted search terms for semantic search (empty for time-based queries)",
-  "dateFilter": "date filter string or null"
+  "type": "today|week|month|year|semantic",
+  "searchTerms": "topic for semantic search, empty for time queries",
+  "dateFilter": null
 }`;
 
   try {
     const response = await aiClient.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct',
+      model: 'meta-llama/llama-3.3-70b-instruct',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 300,
