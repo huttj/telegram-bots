@@ -8,7 +8,7 @@ import { pipeline } from 'stream/promises';
 import { randomUUID } from 'crypto';
 import https from 'https';
 import http from 'http';
-import { embeddings } from 'embeddings';
+import embeddings from 'embeddings';
 
 // Load environment variables
 config();
