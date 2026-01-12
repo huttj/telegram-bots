@@ -69,7 +69,7 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 // Initialize embedding model
 let embeddingModel = null;
 console.log('Initializing embedding model...');
-embeddings('Xenova/all-MiniLM-L6-v2').then(async model => {
+new embeddings('Xenova/all-MiniLM-L6-v2').then(async model => {
   embeddingModel = model;
   console.log('✓ Embedding model initialized (384 dimensions)');
 
