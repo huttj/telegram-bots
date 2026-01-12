@@ -67,17 +67,22 @@ if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 // Initialize embedding model
-let embeddingModel = null;
+// The embeddings library loads the model on first use, so we just need to verify it's available
+let embeddingModelReady = false;
 console.log('Initializing embedding model...');
-new embeddings('Xenova/all-MiniLM-L6-v2').then(async model => {
-  embeddingModel = model;
-  console.log('✓ Embedding model initialized (384 dimensions)');
+(async () => {
+  try {
+    // Test that embeddings library works
+    await embeddings('test', { service: 'transformers', model: 'Xenova/all-MiniLM-L6-v2' });
+    embeddingModelReady = true;
+    console.log('✓ Embedding model initialized (384 dimensions)');
 
-  // Backfill embeddings for existing transcripts
-  await backfillEmbeddings();
-}).catch(err => {
-  console.error('Failed to initialize embedding model:', err);
-});
+    // Backfill embeddings for existing transcripts
+    await backfillEmbeddings();
+  } catch (err) {
+    console.error('Failed to initialize embedding model:', err);
+  }
+})();
 
 // Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
@@ -182,10 +187,13 @@ async function transcribeAudio(filePath) {
 
 // Helper: Generate embedding for text
 async function generateEmbedding(text) {
-  if (!embeddingModel) {
+  if (!embeddingModelReady) {
     throw new Error('Embedding model not initialized');
   }
-  const embedding = await embeddingModel.embed(text);
+  const embedding = await embeddings(text, {
+    service: 'transformers',
+    model: 'Xenova/all-MiniLM-L6-v2'
+  });
   return embedding;
 }
 
@@ -397,7 +405,7 @@ function applyDateFilter(transcripts, dateFilter) {
 
 // Helper: Perform vector similarity search
 async function vectorSearch(queryText, topK = 5, dateFilter = null) {
-  if (!embeddingModel) {
+  if (!embeddingModelReady) {
     throw new Error('Embedding model not initialized');
   }
 
@@ -466,7 +474,7 @@ Based on these entries, provide a helpful and conversational response to the use
 
 // Helper: Backfill embeddings for existing transcripts
 async function backfillEmbeddings() {
-  if (!embeddingModel) {
+  if (!embeddingModelReady) {
     console.log('Embedding model not ready, skipping backfill');
     return;
   }
@@ -528,7 +536,7 @@ bot.on('voice', async (ctx) => {
 
     // Generate embedding for transcript
     let embeddingBuffer = null;
-    if (embeddingModel) {
+    if (embeddingModelReady) {
       try {
         console.log('Generating embedding...');
         const embedding = await generateEmbedding(transcript);
@@ -578,8 +586,8 @@ bot.on('text', async (ctx) => {
     await ctx.react('🤔');
 
     // Check if embedding model is ready
-    console.log('Checking embedding model status:', embeddingModel ? 'ready' : 'not ready');
-    if (!embeddingModel) {
+    console.log('Checking embedding model status:', embeddingModelReady ? 'ready' : 'not ready');
+    if (!embeddingModelReady) {
       console.log('⚠️ Embedding model not ready, notifying user');
       await ctx.reply('⚠️ The embedding model is still initializing. Please try again in a moment.');
       return;
