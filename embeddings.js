@@ -1,15 +1,15 @@
-const { EmbeddingModel, FlagEmbedding } = require("fastembed");
+import { EmbeddingModel, FlagEmbedding } from "fastembed";
 
 const embeddingModelP = FlagEmbedding.init({
     model: EmbeddingModel.BGEBaseEN
 });
 
-async function embed(document) {
+export async function embed(document) {
   const [result] = await embedBatch([document]);
   return result;
 }
 
-async function embedBatch(documents) {
+export async function embedBatch(documents) {
   const embeddingModel = await embeddingModelP;
   const embeddings = embeddingModel.embed(documents);
   const results = [];
@@ -19,9 +19,7 @@ async function embedBatch(documents) {
   return results;
 }
 
-async function embedEach(documents) {
+export async function embedEach(documents) {
   const embeddingModel = await embeddingModelP;
   return embeddingModel.embed(documents);
 }
-
-module.exports = { embed, embedBatch, embedEach };
