@@ -299,7 +299,7 @@ Respond ONLY with JSON:
 
   try {
     const response = await aiClient.chat.completions.create({
-      model: 'meta-llama/llama-3.3-70b-instruct',
+      model: 'anthropic/claude-3.5-haiku',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 300,
@@ -492,7 +492,7 @@ Provide a brief, concise response (2-3 sentences max). Summarize key points and 
 
   try {
     const response = await aiClient.chat.completions.create({
-      model: 'meta-llama/llama-3.3-70b-instruct',
+      model: 'anthropic/claude-3.5-sonnet',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 1000,
