@@ -2,7 +2,7 @@
 # Generated for voice-journal
 
 app = "voice-journal"
-primary_region = "iad"
+primary_region = "sjc"
 
 [build]
 
