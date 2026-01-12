@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import Groq from 'groq-sdk';
+import OpenAI from 'openai';
 import Database from 'better-sqlite3';
 import { config } from 'dotenv';
 import { createWriteStream, createReadStream, unlinkSync } from 'fs';
@@ -17,6 +18,7 @@ config();
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const AUTHORIZED_USER_ID = parseInt(process.env.AUTHORIZED_USER_ID);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
@@ -25,10 +27,21 @@ const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const PORT = process.env.PORT || 3000;
 
 // Validate required environment variables
-if (!TELEGRAM_BOT_TOKEN || !AUTHORIZED_USER_ID || !GROQ_API_KEY) {
+if (!TELEGRAM_BOT_TOKEN || !AUTHORIZED_USER_ID) {
   console.error('Missing required environment variables!');
-  console.error('Required: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID, GROQ_API_KEY');
+  console.error('Required: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID');
   process.exit(1);
+}
+
+if (!OPENROUTER_API_KEY) {
+  console.error('Missing OPENROUTER_API_KEY!');
+  console.error('Required for embeddings and AI inference');
+  process.exit(1);
+}
+
+if (!GROQ_API_KEY) {
+  console.warn('⚠ GROQ_API_KEY not set - audio transcription will not be available');
+  console.warn('  Voice messages will fail to transcribe. Set GROQ_API_KEY if you need this feature.');
 }
 
 // Initialize SQLite database
@@ -77,8 +90,17 @@ if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
   console.warn('⚠ R2 credentials not found - voice files will not be uploaded to cloud storage');
 }
 
-// Initialize Groq client
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+// Initialize AI clients
+const groq = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+
+const openrouter = new OpenAI({
+  apiKey: OPENROUTER_API_KEY,
+  baseURL: 'https://openrouter.ai/api/v1',
+});
+
+// Use OpenRouter as primary AI client, fallback to Groq for transcription if available
+const aiClient = openrouter;
+console.log('✓ Using OpenRouter for AI inference');
 
 // Initialize embedding model
 let embeddingModelReady = false;
@@ -100,21 +122,10 @@ console.log('Initializing embedding model...');
 // Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
-// Middleware: Log all incoming messages
-bot.use((ctx, next) => {
-  console.log('📨 Received update:', {
-    updateId: ctx.update.update_id,
-    from: ctx.from?.id,
-    type: ctx.updateType,
-    text: ctx.message?.text?.substring(0, 50),
-  });
-  return next();
-});
-
 // Middleware: Check if user is authorized
 bot.use((ctx, next) => {
   if (ctx.from?.id !== AUTHORIZED_USER_ID) {
-    console.log(`❌ Unauthorized access attempt from user ${ctx.from?.id} (expected ${AUTHORIZED_USER_ID})`);
+    console.log(`❌ Unauthorized access attempt from user ${ctx.from?.id}`);
     return; // Silently ignore unauthorized users
   }
   console.log(`✓ User authorized: ${ctx.from.id}`);
@@ -181,8 +192,24 @@ function formatTimestamp(unixTimestamp) {
   return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }
 
+// Helper: Format duration as "1m 3s" or "55s"
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  } else {
+    return `${remainingSeconds}s`;
+  }
+}
+
 // Helper: Transcribe audio with Groq Whisper
 async function transcribeAudio(filePath) {
+  if (!groq) {
+    throw new Error('Groq API key required for audio transcription. Please set GROQ_API_KEY in your environment variables.');
+  }
+
   try {
     const transcription = await groq.audio.transcriptions.create({
       file: createReadStream(filePath),
@@ -242,32 +269,37 @@ function bufferToEmbedding(buffer) {
 
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
-  const prompt = `You are a query classifier for a voice journal system. Analyze the user's query and determine:
-1. The query type: "today", "week", "month", "year", "semantic" (for semantic search), or "range" (for specific date ranges)
-2. For semantic searches, extract the key search terms
-3. For any query, extract an optional date filter if mentioned
+  const prompt = `Classify this voice journal query. FIRST check if it mentions a time period, THEN consider if it's a semantic search.
 
 User query: "${userQuery}"
 
-Date filter format examples:
-- "this_year" - current year
-- "this_month" - current month
-- "this_week" - current week
-- "2024" - specific year
-- "2022-2025" - year range
-- "last_year" - previous year
-- null - no filter (search all time)
+STEP 1 - Check for time references (HIGHEST PRIORITY):
+- "today" → type: "today"
+- "this week" / "week" → type: "week"
+- "this month" / "month" → type: "month"
+- "this year" / "year" → type: "year"
 
-Respond ONLY with a JSON object in this exact format:
+If ANY time reference is found, use that type. Ignore other words in the query.
+
+STEP 2 - If NO time reference, it's a semantic search:
+- type: "semantic"
+- Extract the main topic/keywords to searchTerms
+
+Examples:
+"What did I say today?" → type: "today"
+"Show me advice from my journal entry today" → type: "today"
+"What did I talk about coffee?" → type: "semantic", searchTerms: "coffee"
+
+Respond ONLY with JSON:
 {
-  "type": "today|week|month|year|semantic|range",
-  "searchTerms": "extracted search terms for semantic search (empty for time-based queries)",
-  "dateFilter": "date filter string or null"
+  "type": "today|week|month|year|semantic",
+  "searchTerms": "topic for semantic search, empty for time queries",
+  "dateFilter": null
 }`;
 
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
+    const response = await aiClient.chat.completions.create({
+      model: 'anthropic/claude-3.5-haiku',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 300,
@@ -446,8 +478,8 @@ async function vectorSearch(queryText, topK = 5, dateFilter = null) {
 async function generateResponse(userQuery, relevantTranscripts) {
   // Format transcripts for context
   const context = relevantTranscripts.map((t, i) => {
-    const date = new Date(t.created_at * 1000).toLocaleString();
-    return `[${i + 1}] ${date} (${t.duration}s):\n${t.transcript}`;
+    const date = new Date(t.created_at * 1000).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+    return `[${i + 1}] ${date} (${formatDuration(t.duration)}):\n${t.transcript}`;
   }).join('\n\n');
 
   const prompt = `You are a helpful assistant for a voice journal system. The user asked: "${userQuery}"
@@ -456,11 +488,11 @@ Here are the relevant voice journal entries:
 
 ${context}
 
-Based on these entries, provide a helpful and conversational response to the user's query. Summarize key points, identify patterns, and answer their question directly. If the entries don't contain relevant information, say so politely.`;
+Provide a brief, concise response (2-3 sentences max). Summarize key points and answer directly. Keep it short unless the user specifically asks for details.`;
 
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const response = await aiClient.chat.completions.create({
+      model: 'anthropic/claude-3.5-sonnet',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 1000,
@@ -470,9 +502,9 @@ Based on these entries, provide a helpful and conversational response to the use
 
     // Add sources at the bottom
     const sourcesList = relevantTranscripts.map((t, i) => {
-      const date = new Date(t.created_at * 1000).toLocaleDateString();
-      const time = new Date(t.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return `${i + 1}. ${date} at ${time} (${t.duration}s)`;
+      const date = new Date(t.created_at * 1000).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
+      const time = new Date(t.created_at * 1000).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' });
+      return `${i + 1}. ${date} at ${time} (${formatDuration(t.duration)})`;
     }).join('\n');
 
     return `${llmResponse}\n\n---\n📎 Sources (${relevantTranscripts.length}):\n${sourcesList}`;
@@ -524,14 +556,19 @@ bot.on('voice', async (ctx) => {
   const messageId = ctx.message.message_id;
   const timestamp = ctx.message.date;
 
-  console.log(`Received voice message ${messageId} (${voice.duration}s)`);
-
   try {
     // React to show we're processing
     await ctx.react('👀');
 
+    // Check if this voice file has already been processed (deduplication)
+    const existing = db.prepare('SELECT id FROM transcripts WHERE voice_file_id = ?').get(voice.file_id);
+    if (existing) {
+      console.log(`Voice message ${messageId} already exists (duplicate), skipping`);
+      await ctx.react('✅');
+      return;
+    }
+
     // Download voice file from Telegram
-    console.log('Downloading voice file...');
     const tempFilePath = await downloadTelegramFile(voice.file_id);
 
     // Upload to R2
@@ -540,15 +577,12 @@ bot.on('voice', async (ctx) => {
     const uploadedKey = await uploadToR2(tempFilePath, r2Key);
 
     // Transcribe with Groq
-    console.log('Transcribing...');
     const transcript = await transcribeAudio(tempFilePath);
-    console.log(`Transcript: ${transcript.substring(0, 100)}...`);
 
     // Generate embedding for transcript
     let embeddingBuffer = null;
     if (embeddingModelReady) {
       try {
-        console.log('Generating embedding...');
         const embedding = await generateEmbedding(transcript);
         embeddingBuffer = embeddingToBuffer(embedding);
       } catch (error) {
@@ -568,8 +602,6 @@ bot.on('voice', async (ctx) => {
 
     // React with success
     await ctx.react('👍');
-
-    console.log(`✓ Successfully processed voice message ${messageId}`);
   } catch (error) {
     console.error('Error processing voice message:', error);
     await ctx.react('👎');
@@ -578,35 +610,22 @@ bot.on('voice', async (ctx) => {
 
 // Handle text messages (queries)
 bot.on('text', async (ctx) => {
-  console.log('💬 Text message handler triggered');
-  console.log('Message text:', ctx.message.text);
-
   // Skip if it's a command
   if (ctx.message.text.startsWith('/')) {
-    console.log('Skipping - message is a command');
     return;
   }
 
   const userQuery = ctx.message.text;
-  console.log(`📝 Processing query: "${userQuery}"`);
 
   try {
-    // React to show we're processing
-    console.log('Reacting with thinking emoji...');
-    await ctx.react('🤔');
-
     // Check if embedding model is ready
-    console.log('Checking embedding model status:', embeddingModelReady ? 'ready' : 'not ready');
     if (!embeddingModelReady) {
-      console.log('⚠️ Embedding model not ready, notifying user');
       await ctx.reply('⚠️ The embedding model is still initializing. Please try again in a moment.');
       return;
     }
 
     // Step 1: Classify query using small LLM
-    console.log('Step 1: Classifying query with small LLM...');
     const classification = await classifyQuery(userQuery);
-    console.log('Query classification result:', JSON.stringify(classification, null, 2));
 
     // Build search description message
     let searchDescription = '🔍 ';
@@ -632,58 +651,39 @@ bot.on('text', async (ctx) => {
     }
 
     // Send search notification
-    console.log('Sending search description to user:', searchDescription);
     await ctx.reply(searchDescription);
 
     // Step 2: Retrieve relevant transcripts based on query type
-    console.log('Step 2: Retrieving relevant transcripts...');
     let relevantTranscripts = [];
 
     if (classification.type === 'today') {
-      console.log('Getting today\'s transcripts');
       relevantTranscripts = getTranscriptsToday();
     } else if (classification.type === 'week') {
-      console.log('Getting this week\'s transcripts');
       relevantTranscripts = getTranscriptsThisWeek();
     } else if (classification.type === 'month') {
-      console.log('Getting this month\'s transcripts');
       relevantTranscripts = getTranscriptsThisMonth();
     } else if (classification.type === 'year') {
-      console.log('Getting this year\'s transcripts');
       relevantTranscripts = getTranscriptsThisYear();
     } else {
       // Semantic search with optional date filter
       const searchTerms = classification.searchTerms || userQuery;
-      console.log(`Performing vector search for: "${searchTerms}" with date filter:`, classification.dateFilter);
       relevantTranscripts = await vectorSearch(searchTerms, 5, classification.dateFilter);
     }
 
-    console.log(`Found ${relevantTranscripts.length} relevant transcripts`);
-
     if (relevantTranscripts.length === 0) {
-      console.log('No transcripts found, notifying user');
       await ctx.reply('I couldn\'t find any relevant voice notes for your query. Try recording some voice notes first!');
-      await ctx.react('🤷');
       return;
     }
 
     // Step 3: Generate response using medium LLM
-    console.log('Step 3: Generating response with medium LLM...');
     const response = await generateResponse(userQuery, relevantTranscripts);
-    console.log(`Generated response (${response.length} chars)`);
 
     // Send response to user
-    console.log('Sending response to user...');
     await ctx.reply(response);
-    await ctx.react('✅');
-
-    console.log('✓ Query processed successfully');
   } catch (error) {
     console.error('❌ Error processing query:', error);
-    console.error('Error stack:', error.stack);
     try {
       await ctx.reply('Sorry, I encountered an error processing your query. Please try again.');
-      await ctx.react('❌');
     } catch (replyError) {
       console.error('Failed to send error message to user:', replyError);
     }
@@ -698,8 +698,8 @@ bot.command('start', (ctx) => {
 // Handle stats command
 bot.command('stats', (ctx) => {
   const stats = db.prepare('SELECT COUNT(*) as count, SUM(duration) as total_duration FROM transcripts').get();
-  const totalMinutes = Math.round((stats.total_duration || 0) / 60);
-  ctx.reply(`📊 Stats:\n\nTotal voice notes: ${stats.count}\nTotal duration: ${totalMinutes} minutes`);
+  const formattedDuration = formatDuration(stats.total_duration || 0);
+  ctx.reply(`📊 Stats:\n\nTotal voice notes: ${stats.count}\nTotal duration: ${formattedDuration}`);
 });
 
 // Start the bot
