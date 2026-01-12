@@ -557,6 +557,17 @@ bot.on('voice', async (ctx) => {
   const timestamp = ctx.message.date;
 
   try {
+    // React to show we're processing
+    await ctx.react('👀');
+
+    // Check if this voice file has already been processed (deduplication)
+    const existing = db.prepare('SELECT id FROM transcripts WHERE voice_file_id = ?').get(voice.file_id);
+    if (existing) {
+      console.log(`Voice message ${messageId} already exists (duplicate), skipping`);
+      await ctx.react('✅');
+      return;
+    }
+
     // Download voice file from Telegram
     const tempFilePath = await downloadTelegramFile(voice.file_id);
 
@@ -588,8 +599,12 @@ bot.on('voice', async (ctx) => {
 
     // Clean up temp file
     unlinkSync(tempFilePath);
+
+    // React with success
+    await ctx.react('👍');
   } catch (error) {
     console.error('Error processing voice message:', error);
+    await ctx.react('👎');
   }
 });
 
