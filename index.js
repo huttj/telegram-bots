@@ -284,17 +284,20 @@ If ANY time reference is found, use that type. Ignore other words in the query.
 
 STEP 2 - If NO time reference, it's a semantic search:
 - type: "semantic"
-- Extract the main topic/keywords to searchTerms
+- For introspective/analytical questions (about feelings, personality, patterns, impressions), use first-person phrases that appear in journal entries: "I feel" "I think" "I am" "I want" "I need"
+- For questions about specific topics, use those topic keywords
+- If no clear topic, default to "week" type for recent entries
 
 Examples:
 "What did I say today?" → type: "today"
-"Show me advice from my journal entry today" → type: "today"
+"What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am"
 "What did I talk about coffee?" → type: "semantic", searchTerms: "coffee"
+"How have I been feeling?" → type: "semantic", searchTerms: "I feel I felt feeling"
 
 Respond ONLY with JSON:
 {
   "type": "today|week|month|year|semantic",
-  "searchTerms": "topic for semantic search, empty for time queries",
+  "searchTerms": "first-person phrases or topic keywords",
   "dateFilter": null
 }`;
 
@@ -489,7 +492,7 @@ Here are your relevant voice journal entries:
 
 ${context}
 
-Provide a brief, concise response (2-3 sentences max). Summarize key points and answer directly. Keep it short unless specifically asked for details.`;
+Respond naturally to the question. Match the level of detail and thoroughness requested in the query. If asked to be brief, keep it concise. If asked to be thorough, detailed, or to read between the lines, provide a comprehensive analysis.`;
 
   try {
     const response = await aiClient.chat.completions.create({
