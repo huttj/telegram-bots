@@ -213,15 +213,26 @@ function bufferToEmbedding(buffer) {
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
   const prompt = `You are a query classifier for a voice journal system. Analyze the user's query and determine:
-1. The query type: "today", "week", "month", or "semantic" (for semantic search)
+1. The query type: "today", "week", "month", "year", "semantic" (for semantic search), or "range" (for specific date ranges)
 2. For semantic searches, extract the key search terms
+3. For any query, extract an optional date filter if mentioned
 
 User query: "${userQuery}"
 
+Date filter format examples:
+- "this_year" - current year
+- "this_month" - current month
+- "this_week" - current week
+- "2024" - specific year
+- "2022-2025" - year range
+- "last_year" - previous year
+- null - no filter (search all time)
+
 Respond ONLY with a JSON object in this exact format:
 {
-  "type": "today|week|month|semantic",
-  "searchTerms": "extracted search terms for semantic search (empty for time-based queries)"
+  "type": "today|week|month|year|semantic|range",
+  "searchTerms": "extracted search terms for semantic search (empty for time-based queries)",
+  "dateFilter": "date filter string or null"
 }`;
 
   try {
@@ -229,7 +240,7 @@ Respond ONLY with a JSON object in this exact format:
       model: 'llama-3.1-8b-instant',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      max_tokens: 200,
+      max_tokens: 300,
     });
 
     const content = response.choices[0].message.content.trim();
@@ -242,7 +253,7 @@ Respond ONLY with a JSON object in this exact format:
   } catch (error) {
     console.error('Error classifying query:', error);
     // Default to semantic search if classification fails
-    return { type: 'semantic', searchTerms: userQuery };
+    return { type: 'semantic', searchTerms: userQuery, dateFilter: null };
   }
 }
 
@@ -274,8 +285,106 @@ function getTranscriptsThisMonth() {
   return stmt.all(monthStartTimestamp);
 }
 
+// Helper: Get transcripts from this year
+function getTranscriptsThisYear() {
+  const now = new Date();
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const yearStartTimestamp = Math.floor(yearStart.getTime() / 1000);
+
+  const stmt = db.prepare('SELECT * FROM transcripts WHERE created_at >= ? ORDER BY created_at DESC');
+  return stmt.all(yearStartTimestamp);
+}
+
+// Helper: Parse date filter string and return {start, end} timestamps
+function parseDateFilter(dateFilter) {
+  if (!dateFilter) return null;
+
+  const now = new Date();
+
+  // Handle relative date filters
+  if (dateFilter === 'this_year') {
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    return {
+      start: Math.floor(yearStart.getTime() / 1000),
+      end: null,
+      description: 'this year'
+    };
+  }
+
+  if (dateFilter === 'this_month') {
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    return {
+      start: Math.floor(monthStart.getTime() / 1000),
+      end: null,
+      description: 'this month'
+    };
+  }
+
+  if (dateFilter === 'this_week') {
+    const weekStart = new Date(now);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    return {
+      start: Math.floor(weekStart.getTime() / 1000),
+      end: null,
+      description: 'this week'
+    };
+  }
+
+  if (dateFilter === 'last_year') {
+    const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
+    const lastYearEnd = new Date(now.getFullYear(), 0, 1);
+    return {
+      start: Math.floor(lastYearStart.getTime() / 1000),
+      end: Math.floor(lastYearEnd.getTime() / 1000),
+      description: 'last year'
+    };
+  }
+
+  // Handle year range like "2022-2025"
+  const rangeMatch = dateFilter.match(/^(\d{4})-(\d{4})$/);
+  if (rangeMatch) {
+    const startYear = parseInt(rangeMatch[1]);
+    const endYear = parseInt(rangeMatch[2]);
+    const rangeStart = new Date(startYear, 0, 1);
+    const rangeEnd = new Date(endYear + 1, 0, 1);
+    return {
+      start: Math.floor(rangeStart.getTime() / 1000),
+      end: Math.floor(rangeEnd.getTime() / 1000),
+      description: `${startYear}-${endYear}`
+    };
+  }
+
+  // Handle single year like "2024"
+  const yearMatch = dateFilter.match(/^(\d{4})$/);
+  if (yearMatch) {
+    const year = parseInt(yearMatch[1]);
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year + 1, 0, 1);
+    return {
+      start: Math.floor(yearStart.getTime() / 1000),
+      end: Math.floor(yearEnd.getTime() / 1000),
+      description: year.toString()
+    };
+  }
+
+  return null;
+}
+
+// Helper: Apply date filter to transcripts
+function applyDateFilter(transcripts, dateFilter) {
+  const filter = parseDateFilter(dateFilter);
+  if (!filter) return transcripts;
+
+  return transcripts.filter(t => {
+    if (filter.start && t.created_at < filter.start) return false;
+    if (filter.end && t.created_at >= filter.end) return false;
+    return true;
+  });
+}
+
 // Helper: Perform vector similarity search
-async function vectorSearch(queryText, topK = 5) {
+async function vectorSearch(queryText, topK = 5, dateFilter = null) {
   if (!embeddingModel) {
     throw new Error('Embedding model not initialized');
   }
@@ -285,7 +394,12 @@ async function vectorSearch(queryText, topK = 5) {
 
   // Get all transcripts with embeddings
   const stmt = db.prepare('SELECT * FROM transcripts WHERE embedding IS NOT NULL');
-  const transcripts = stmt.all();
+  let transcripts = stmt.all();
+
+  // Apply date filter if provided
+  if (dateFilter) {
+    transcripts = applyDateFilter(transcripts, dateFilter);
+  }
 
   // Calculate similarity scores
   const results = transcripts.map(transcript => {
@@ -322,7 +436,16 @@ Based on these entries, provide a helpful and conversational response to the use
       max_tokens: 1000,
     });
 
-    return response.choices[0].message.content;
+    const llmResponse = response.choices[0].message.content;
+
+    // Add sources at the bottom
+    const sourcesList = relevantTranscripts.map((t, i) => {
+      const date = new Date(t.created_at * 1000).toLocaleDateString();
+      const time = new Date(t.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return `${i + 1}. ${date} at ${time} (${t.duration}s)`;
+    }).join('\n');
+
+    return `${llmResponse}\n\n---\n📎 Sources (${relevantTranscripts.length}):\n${sourcesList}`;
   } catch (error) {
     console.error('Error generating response:', error);
     throw error;
@@ -448,6 +571,32 @@ bot.on('text', async (ctx) => {
     const classification = await classifyQuery(userQuery);
     console.log(`Query classified as: ${classification.type}`);
 
+    // Build search description message
+    let searchDescription = '🔍 ';
+    if (classification.type === 'semantic') {
+      const searchTerms = classification.searchTerms || userQuery;
+      searchDescription += `Searching for: "${searchTerms}"`;
+      if (classification.dateFilter) {
+        const dateInfo = parseDateFilter(classification.dateFilter);
+        if (dateInfo) {
+          searchDescription += ` (${dateInfo.description})`;
+        }
+      } else {
+        searchDescription += ' (all time)';
+      }
+    } else if (classification.type === 'today') {
+      searchDescription += 'Searching today\'s notes';
+    } else if (classification.type === 'week') {
+      searchDescription += 'Searching this week\'s notes';
+    } else if (classification.type === 'month') {
+      searchDescription += 'Searching this month\'s notes';
+    } else if (classification.type === 'year') {
+      searchDescription += 'Searching this year\'s notes';
+    }
+
+    // Send search notification
+    await ctx.reply(searchDescription);
+
     // Step 2: Retrieve relevant transcripts based on query type
     let relevantTranscripts = [];
 
@@ -457,11 +606,13 @@ bot.on('text', async (ctx) => {
       relevantTranscripts = getTranscriptsThisWeek();
     } else if (classification.type === 'month') {
       relevantTranscripts = getTranscriptsThisMonth();
+    } else if (classification.type === 'year') {
+      relevantTranscripts = getTranscriptsThisYear();
     } else {
-      // Semantic search
+      // Semantic search with optional date filter
       const searchTerms = classification.searchTerms || userQuery;
       console.log(`Performing vector search for: ${searchTerms}`);
-      relevantTranscripts = await vectorSearch(searchTerms, 5);
+      relevantTranscripts = await vectorSearch(searchTerms, 5, classification.dateFilter);
     }
 
     console.log(`Found ${relevantTranscripts.length} relevant transcripts`);
