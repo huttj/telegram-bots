@@ -82,12 +82,24 @@ embeddings('Xenova/all-MiniLM-L6-v2').then(async model => {
 // Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
+// Middleware: Log all incoming messages
+bot.use((ctx, next) => {
+  console.log('📨 Received update:', {
+    updateId: ctx.update.update_id,
+    from: ctx.from?.id,
+    type: ctx.updateType,
+    text: ctx.message?.text?.substring(0, 50),
+  });
+  return next();
+});
+
 // Middleware: Check if user is authorized
 bot.use((ctx, next) => {
   if (ctx.from?.id !== AUTHORIZED_USER_ID) {
-    console.log(`Unauthorized access attempt from user ${ctx.from?.id}`);
+    console.log(`❌ Unauthorized access attempt from user ${ctx.from?.id} (expected ${AUTHORIZED_USER_ID})`);
     return; // Silently ignore unauthorized users
   }
+  console.log(`✓ User authorized: ${ctx.from.id}`);
   return next();
 });
 
@@ -548,28 +560,35 @@ bot.on('voice', async (ctx) => {
 
 // Handle text messages (queries)
 bot.on('text', async (ctx) => {
+  console.log('💬 Text message handler triggered');
+  console.log('Message text:', ctx.message.text);
+
   // Skip if it's a command
   if (ctx.message.text.startsWith('/')) {
+    console.log('Skipping - message is a command');
     return;
   }
 
   const userQuery = ctx.message.text;
-  console.log(`Received query: ${userQuery}`);
+  console.log(`📝 Processing query: "${userQuery}"`);
 
   try {
     // React to show we're processing
+    console.log('Reacting with thinking emoji...');
     await ctx.react('🤔');
 
     // Check if embedding model is ready
+    console.log('Checking embedding model status:', embeddingModel ? 'ready' : 'not ready');
     if (!embeddingModel) {
+      console.log('⚠️ Embedding model not ready, notifying user');
       await ctx.reply('⚠️ The embedding model is still initializing. Please try again in a moment.');
       return;
     }
 
     // Step 1: Classify query using small LLM
-    console.log('Classifying query...');
+    console.log('Step 1: Classifying query with small LLM...');
     const classification = await classifyQuery(userQuery);
-    console.log(`Query classified as: ${classification.type}`);
+    console.log('Query classification result:', JSON.stringify(classification, null, 2));
 
     // Build search description message
     let searchDescription = '🔍 ';
@@ -595,47 +614,61 @@ bot.on('text', async (ctx) => {
     }
 
     // Send search notification
+    console.log('Sending search description to user:', searchDescription);
     await ctx.reply(searchDescription);
 
     // Step 2: Retrieve relevant transcripts based on query type
+    console.log('Step 2: Retrieving relevant transcripts...');
     let relevantTranscripts = [];
 
     if (classification.type === 'today') {
+      console.log('Getting today\'s transcripts');
       relevantTranscripts = getTranscriptsToday();
     } else if (classification.type === 'week') {
+      console.log('Getting this week\'s transcripts');
       relevantTranscripts = getTranscriptsThisWeek();
     } else if (classification.type === 'month') {
+      console.log('Getting this month\'s transcripts');
       relevantTranscripts = getTranscriptsThisMonth();
     } else if (classification.type === 'year') {
+      console.log('Getting this year\'s transcripts');
       relevantTranscripts = getTranscriptsThisYear();
     } else {
       // Semantic search with optional date filter
       const searchTerms = classification.searchTerms || userQuery;
-      console.log(`Performing vector search for: ${searchTerms}`);
+      console.log(`Performing vector search for: "${searchTerms}" with date filter:`, classification.dateFilter);
       relevantTranscripts = await vectorSearch(searchTerms, 5, classification.dateFilter);
     }
 
     console.log(`Found ${relevantTranscripts.length} relevant transcripts`);
 
     if (relevantTranscripts.length === 0) {
+      console.log('No transcripts found, notifying user');
       await ctx.reply('I couldn\'t find any relevant voice notes for your query. Try recording some voice notes first!');
       await ctx.react('🤷');
       return;
     }
 
     // Step 3: Generate response using medium LLM
-    console.log('Generating response...');
+    console.log('Step 3: Generating response with medium LLM...');
     const response = await generateResponse(userQuery, relevantTranscripts);
+    console.log(`Generated response (${response.length} chars)`);
 
     // Send response to user
+    console.log('Sending response to user...');
     await ctx.reply(response);
     await ctx.react('✅');
 
     console.log('✓ Query processed successfully');
   } catch (error) {
-    console.error('Error processing query:', error);
-    await ctx.reply('Sorry, I encountered an error processing your query. Please try again.');
-    await ctx.react('❌');
+    console.error('❌ Error processing query:', error);
+    console.error('Error stack:', error.stack);
+    try {
+      await ctx.reply('Sorry, I encountered an error processing your query. Please try again.');
+      await ctx.react('❌');
+    } catch (replyError) {
+      console.error('Failed to send error message to user:', replyError);
+    }
   }
 });
 
