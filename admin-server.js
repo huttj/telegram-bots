@@ -6,7 +6,7 @@ import { embed } from './embeddings.js';
 
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '80', 10);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const DB_PATH = process.env.NODE_ENV === 'production' ? '/data/voice-journal.db' : 'voice-journal.db';
+const DB_PATH = process.env.FLY_APP_NAME ? '/data/voice-journal.db' : 'voice-journal.db';
 
 if (!ADMIN_PASSWORD) {
   console.warn('⚠️  Warning: ADMIN_PASSWORD not set. Admin interface will be disabled.');
