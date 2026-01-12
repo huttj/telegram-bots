@@ -483,13 +483,13 @@ async function generateResponse(userQuery, relevantTranscripts) {
     return `[${i + 1}] ${date} (${formatDuration(t.duration)}):\n${t.transcript}`;
   }).join('\n\n');
 
-  const prompt = `You are a helpful assistant for a voice journal system. The user asked: "${userQuery}"
+  const prompt = `You are a helpful assistant for a voice journal system. You asked: "${userQuery}"
 
-Here are the relevant voice journal entries:
+Here are your relevant voice journal entries:
 
 ${context}
 
-Provide a brief, concise response (2-3 sentences max). Summarize key points and answer directly. Keep it short unless the user specifically asks for details.`;
+Provide a brief, concise response (2-3 sentences max). Summarize key points and answer directly. Keep it short unless specifically asked for details.`;
 
   try {
     const response = await aiClient.chat.completions.create({
