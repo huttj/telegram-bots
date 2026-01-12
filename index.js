@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import Groq from 'groq-sdk';
+import OpenAI from 'openai';
 import Database from 'better-sqlite3';
 import { config } from 'dotenv';
 import { createWriteStream, createReadStream, unlinkSync } from 'fs';
@@ -17,6 +18,7 @@ config();
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const AUTHORIZED_USER_ID = parseInt(process.env.AUTHORIZED_USER_ID);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
@@ -25,10 +27,21 @@ const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const PORT = process.env.PORT || 3000;
 
 // Validate required environment variables
-if (!TELEGRAM_BOT_TOKEN || !AUTHORIZED_USER_ID || !GROQ_API_KEY) {
+if (!TELEGRAM_BOT_TOKEN || !AUTHORIZED_USER_ID) {
   console.error('Missing required environment variables!');
-  console.error('Required: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID, GROQ_API_KEY');
+  console.error('Required: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID');
   process.exit(1);
+}
+
+if (!OPENROUTER_API_KEY) {
+  console.error('Missing OPENROUTER_API_KEY!');
+  console.error('Required for embeddings and AI inference');
+  process.exit(1);
+}
+
+if (!GROQ_API_KEY) {
+  console.warn('⚠ GROQ_API_KEY not set - audio transcription will not be available');
+  console.warn('  Voice messages will fail to transcribe. Set GROQ_API_KEY if you need this feature.');
 }
 
 // Initialize SQLite database
@@ -77,8 +90,17 @@ if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
   console.warn('⚠ R2 credentials not found - voice files will not be uploaded to cloud storage');
 }
 
-// Initialize Groq client
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+// Initialize AI clients
+const groq = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+
+const openrouter = new OpenAI({
+  apiKey: OPENROUTER_API_KEY,
+  baseURL: 'https://openrouter.ai/api/v1',
+});
+
+// Use OpenRouter as primary AI client, fallback to Groq for transcription if available
+const aiClient = openrouter;
+console.log('✓ Using OpenRouter for AI inference');
 
 // Initialize embedding model
 let embeddingModelReady = false;
@@ -183,6 +205,10 @@ function formatTimestamp(unixTimestamp) {
 
 // Helper: Transcribe audio with Groq Whisper
 async function transcribeAudio(filePath) {
+  if (!groq) {
+    throw new Error('Groq API key required for audio transcription. Please set GROQ_API_KEY in your environment variables.');
+  }
+
   try {
     const transcription = await groq.audio.transcriptions.create({
       file: createReadStream(filePath),
@@ -266,8 +292,8 @@ Respond ONLY with a JSON object in this exact format:
 }`;
 
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
+    const response = await aiClient.chat.completions.create({
+      model: 'meta-llama/llama-3.1-8b-instruct',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 300,
@@ -459,8 +485,8 @@ ${context}
 Based on these entries, provide a helpful and conversational response to the user's query. Summarize key points, identify patterns, and answer their question directly. If the entries don't contain relevant information, say so politely.`;
 
   try {
-    const response = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const response = await aiClient.chat.completions.create({
+      model: 'meta-llama/llama-3.3-70b-instruct',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 1000,
