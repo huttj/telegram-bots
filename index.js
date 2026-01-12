@@ -47,6 +47,20 @@ db.exec(`
   )
 `);
 
+// Migration: Add embedding column if it doesn't exist
+try {
+  const tableInfo = db.prepare("PRAGMA table_info(transcripts)").all();
+  const hasEmbeddingColumn = tableInfo.some(col => col.name === 'embedding');
+
+  if (!hasEmbeddingColumn) {
+    console.log('Running migration: Adding embedding column to transcripts table...');
+    db.exec('ALTER TABLE transcripts ADD COLUMN embedding BLOB');
+    console.log('✓ Migration complete: embedding column added');
+  }
+} catch (error) {
+  console.error('Error checking/adding embedding column:', error);
+}
+
 // Initialize R2 client (S3-compatible)
 let r2Client = null;
 if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
