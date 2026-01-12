@@ -1,13 +1,7 @@
 FROM node:20-slim
 
 # Install build dependencies for better-sqlite3 and tools for Litestream
-RUN apt-get update && apt-get install -y \
-  python3 \
-  make \
-  g++ \
-  curl \
-  wget \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 make g++ curl bash wget && rm -rf /var/lib/apt/lists/*
 
 # Install Litestream
 RUN wget https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
