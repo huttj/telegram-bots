@@ -8,7 +8,7 @@ import { pipeline } from 'stream/promises';
 import { randomUUID } from 'crypto';
 import https from 'https';
 import http from 'http';
-import embeddings from 'embeddings';
+import { embed } from './embeddings.js';
 
 // Load environment variables
 config();
@@ -67,15 +67,14 @@ if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 // Initialize embedding model
-// The embeddings library loads the model on first use, so we just need to verify it's available
 let embeddingModelReady = false;
 console.log('Initializing embedding model...');
 (async () => {
   try {
-    // Test that embeddings library works
-    await embeddings('test', { service: 'transformers', model: 'Xenova/all-MiniLM-L6-v2' });
+    // Test that embedding function works
+    await embed('test');
     embeddingModelReady = true;
-    console.log('✓ Embedding model initialized (384 dimensions)');
+    console.log('✓ Embedding model initialized');
 
     // Backfill embeddings for existing transcripts
     await backfillEmbeddings();
@@ -190,10 +189,7 @@ async function generateEmbedding(text) {
   if (!embeddingModelReady) {
     throw new Error('Embedding model not initialized');
   }
-  const embedding = await embeddings(text, {
-    service: 'transformers',
-    model: 'Xenova/all-MiniLM-L6-v2'
-  });
+  const embedding = await embed(text);
   return embedding;
 }
 
