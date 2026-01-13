@@ -6,14 +6,17 @@ import { embed } from './embeddings.js';
 
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '80', 10);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const DB_PATH = process.env.FLY_APP_NAME ? '/data/voice-journal.db' : 'voice-journal.db';
+const VOICE_JOURNAL_DB_PATH = process.env.FLY_APP_NAME ? '/data/voice-journal.db' : 'voice-journal.db';
+const TASTE_BOT_DB_PATH = process.env.FLY_APP_NAME ? '/data/taste-bot.db' : 'taste-bot.db';
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || 'telegram-bots';
 
 if (!ADMIN_PASSWORD) {
   console.warn('⚠️  Warning: ADMIN_PASSWORD not set. Admin interface will be disabled.');
 }
 
-// Initialize database
-const db = new Database(DB_PATH);
+// Initialize databases
+const voiceJournalDb = new Database(VOICE_JOURNAL_DB_PATH);
+const tasteBotDb = new Database(TASTE_BOT_DB_PATH);
 
 // Initialize S3/R2 client
 const r2Client = new S3Client({
@@ -45,7 +48,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Journal Admin</title>
+    <title>Telegram Bots Admin</title>
     <style>
         * {
             box-sizing: border-box;
@@ -65,8 +68,39 @@ app.get('/', (req, res) => {
         }
         h1 {
             color: #60a5fa;
-            margin-bottom: 30px;
+            margin-bottom: 20px;
             font-size: 2em;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #334155;
+        }
+        .tab {
+            padding: 12px 24px;
+            background: transparent;
+            border: none;
+            border-bottom: 3px solid transparent;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .tab:hover {
+            color: #e2e8f0;
+            background: #1e293b;
+        }
+        .tab.active {
+            color: #60a5fa;
+            border-bottom-color: #60a5fa;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
         }
         .controls {
             background: #1e293b;
@@ -219,55 +253,107 @@ app.get('/', (req, res) => {
 </head>
 <body>
     <div class="container">
-        <h1>Voice Journal Admin</h1>
+        <h1>Telegram Bots Admin</h1>
 
-        <div class="controls">
-            <input type="text" id="searchInput" placeholder="Search transcripts..." />
-            <input type="date" id="dateFilter" />
-            <button onclick="clearFilters()" class="secondary">Clear Filters</button>
-            <span class="stats" id="stats">Loading...</span>
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('voice-journal')">🎙 Voice Journal</button>
+            <button class="tab" onclick="switchTab('taste-bot')">🎨 Taste Bot</button>
         </div>
 
-        <div id="messageList" class="message-list">
-            <div class="loading">Loading messages...</div>
+        <!-- Voice Journal Tab -->
+        <div id="voice-journal" class="tab-content active">
+            <div class="controls">
+                <input type="text" id="vj-searchInput" placeholder="Search transcripts..." />
+                <input type="date" id="vj-dateFilter" />
+                <button onclick="clearFiltersVJ()" class="secondary">Clear Filters</button>
+                <span class="stats" id="vj-stats">Loading...</span>
+            </div>
+
+            <div id="vj-messageList" class="message-list">
+                <div class="loading">Loading messages...</div>
+            </div>
+        </div>
+
+        <!-- Taste Bot Tab -->
+        <div id="taste-bot" class="tab-content">
+            <div class="controls">
+                <input type="text" id="tb-searchInput" placeholder="Search submissions..." />
+                <select id="tb-contentTypeFilter">
+                    <option value="">All Types</option>
+                    <option value="url">URLs</option>
+                    <option value="photo">Photos</option>
+                    <option value="video">Videos</option>
+                    <option value="gif">GIFs</option>
+                    <option value="audio">Audio</option>
+                    <option value="document">Documents</option>
+                </select>
+                <button onclick="clearFiltersTB()" class="secondary">Clear Filters</button>
+                <span class="stats" id="tb-stats">Loading...</span>
+            </div>
+
+            <div id="tb-submissionList" class="message-list">
+                <div class="loading">Loading submissions...</div>
+            </div>
         </div>
     </div>
 
     <script>
-        let messages = [];
-        let editingId = null;
+        // Tab switching
+        let currentTab = 'voice-journal';
 
-        async function loadMessages() {
+        function switchTab(tabName) {
+            // Update active tab
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById(tabName).classList.add('active');
+
+            currentTab = tabName;
+
+            // Load data for the tab
+            if (tabName === 'voice-journal') {
+                loadVJMessages();
+            } else if (tabName === 'taste-bot') {
+                loadTBSubmissions();
+            }
+        }
+
+        // ========== VOICE JOURNAL TAB ==========
+        let vjMessages = [];
+        let vjEditingId = null;
+
+        async function loadVJMessages() {
             try {
                 const params = new URLSearchParams();
-                const search = document.getElementById('searchInput').value;
-                const date = document.getElementById('dateFilter').value;
+                const search = document.getElementById('vj-searchInput').value;
+                const date = document.getElementById('vj-dateFilter').value;
 
                 if (search) params.append('search', search);
                 if (date) params.append('date', date);
 
-                const response = await fetch('/api/messages?' + params);
-                messages = await response.json();
-                renderMessages();
+                const response = await fetch('/api/voice-journal/messages?' + params);
+                vjMessages = await response.json();
+                renderVJMessages();
             } catch (error) {
                 console.error('Failed to load messages:', error);
-                document.getElementById('messageList').innerHTML =
+                document.getElementById('vj-messageList').innerHTML =
                     '<div class="empty">Failed to load messages. Please refresh.</div>';
             }
         }
 
-        function renderMessages() {
-            const container = document.getElementById('messageList');
-            const stats = document.getElementById('stats');
+        function renderVJMessages() {
+            const container = document.getElementById('vj-messageList');
+            const stats = document.getElementById('vj-stats');
 
-            stats.textContent = \`\${messages.length} message\${messages.length !== 1 ? 's' : ''}\`;
+            stats.textContent = \`\${vjMessages.length} message\${vjMessages.length !== 1 ? 's' : ''}\`;
 
-            if (messages.length === 0) {
+            if (vjMessages.length === 0) {
                 container.innerHTML = '<div class="empty">No messages found.</div>';
                 return;
             }
 
-            container.innerHTML = messages.map(msg => \`
+            container.innerHTML = vjMessages.map(msg => \`
                 <div class="message-card" data-id="\${msg.id}">
                     <div class="message-header">
                         <div class="message-meta">
@@ -276,61 +362,61 @@ app.get('/', (req, res) => {
                             <span>🆔 #\${msg.id}</span>
                         </div>
                         <div class="message-actions">
-                            <button onclick="toggleEdit(\${msg.id})" class="secondary" id="edit-btn-\${msg.id}">Edit</button>
-                            <button onclick="deleteMessage(\${msg.id})" class="danger">Delete</button>
+                            <button onclick="toggleVJEdit(\${msg.id})" class="secondary" id="vj-edit-btn-\${msg.id}">Edit</button>
+                            <button onclick="deleteVJMessage(\${msg.id})" class="danger">Delete</button>
                         </div>
                     </div>
 
                     <audio controls preload="metadata">
-                        <source src="/api/audio/\${msg.id}" type="audio/ogg">
+                        <source src="/api/voice-journal/audio/\${msg.id}" type="audio/ogg">
                         Your browser does not support the audio element.
                     </audio>
 
-                    <div class="transcript" id="transcript-\${msg.id}">\${escapeHtml(msg.transcript)}</div>
-                    <textarea id="textarea-\${msg.id}">\${escapeHtml(msg.transcript)}</textarea>
+                    <div class="transcript" id="vj-transcript-\${msg.id}">\${escapeHtml(msg.transcript)}</div>
+                    <textarea id="vj-textarea-\${msg.id}">\${escapeHtml(msg.transcript)}</textarea>
 
-                    <div class="edit-controls" id="edit-controls-\${msg.id}">
-                        <button onclick="saveEdit(\${msg.id})">Save Changes</button>
-                        <button onclick="cancelEdit(\${msg.id})" class="secondary">Cancel</button>
+                    <div class="edit-controls" id="vj-edit-controls-\${msg.id}">
+                        <button onclick="saveVJEdit(\${msg.id})">Save Changes</button>
+                        <button onclick="cancelVJEdit(\${msg.id})" class="secondary">Cancel</button>
                     </div>
                 </div>
             \`).join('');
         }
 
-        function toggleEdit(id) {
-            if (editingId && editingId !== id) {
-                cancelEdit(editingId);
+        function toggleVJEdit(id) {
+            if (vjEditingId && vjEditingId !== id) {
+                cancelVJEdit(vjEditingId);
             }
 
-            const transcript = document.getElementById(\`transcript-\${id}\`);
-            const textarea = document.getElementById(\`textarea-\${id}\`);
-            const controls = document.getElementById(\`edit-controls-\${id}\`);
-            const editBtn = document.getElementById(\`edit-btn-\${id}\`);
+            const transcript = document.getElementById(\`vj-transcript-\${id}\`);
+            const textarea = document.getElementById(\`vj-textarea-\${id}\`);
+            const controls = document.getElementById(\`vj-edit-controls-\${id}\`);
+            const editBtn = document.getElementById(\`vj-edit-btn-\${id}\`);
 
             transcript.classList.toggle('editing');
             textarea.classList.toggle('editing');
             controls.classList.toggle('editing');
 
             if (textarea.classList.contains('editing')) {
-                editingId = id;
+                vjEditingId = id;
                 editBtn.textContent = 'Cancel';
                 textarea.focus();
             } else {
-                editingId = null;
+                vjEditingId = null;
                 editBtn.textContent = 'Edit';
             }
         }
 
-        function cancelEdit(id) {
-            const msg = messages.find(m => m.id === id);
+        function cancelVJEdit(id) {
+            const msg = vjMessages.find(m => m.id === id);
             if (msg) {
-                document.getElementById(\`textarea-\${id}\`).value = msg.transcript;
+                document.getElementById(\`vj-textarea-\${id}\`).value = msg.transcript;
             }
-            toggleEdit(id);
+            toggleVJEdit(id);
         }
 
-        async function saveEdit(id) {
-            const textarea = document.getElementById(\`textarea-\${id}\`);
+        async function saveVJEdit(id) {
+            const textarea = document.getElementById(\`vj-textarea-\${id}\`);
             const newTranscript = textarea.value.trim();
 
             if (!newTranscript) {
@@ -339,7 +425,7 @@ app.get('/', (req, res) => {
             }
 
             try {
-                const response = await fetch(\`/api/messages/\${id}\`, {
+                const response = await fetch(\`/api/voice-journal/messages/\${id}\`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ transcript: newTranscript })
@@ -347,43 +433,190 @@ app.get('/', (req, res) => {
 
                 if (!response.ok) throw new Error('Failed to update');
 
-                const msg = messages.find(m => m.id === id);
+                const msg = vjMessages.find(m => m.id === id);
                 if (msg) msg.transcript = newTranscript;
 
-                document.getElementById(\`transcript-\${id}\`).textContent = newTranscript;
-                toggleEdit(id);
+                document.getElementById(\`vj-transcript-\${id}\`).textContent = newTranscript;
+                toggleVJEdit(id);
             } catch (error) {
                 console.error('Failed to save:', error);
                 alert('Failed to save changes. Please try again.');
             }
         }
 
-        async function deleteMessage(id) {
+        async function deleteVJMessage(id) {
             if (!confirm('Are you sure you want to delete this message? This cannot be undone.')) {
                 return;
             }
 
             try {
-                const response = await fetch(\`/api/messages/\${id}\`, {
+                const response = await fetch(\`/api/voice-journal/messages/\${id}\`, {
                     method: 'DELETE'
                 });
 
                 if (!response.ok) throw new Error('Failed to delete');
 
-                messages = messages.filter(m => m.id !== id);
-                renderMessages();
+                vjMessages = vjMessages.filter(m => m.id !== id);
+                renderVJMessages();
             } catch (error) {
                 console.error('Failed to delete:', error);
                 alert('Failed to delete message. Please try again.');
             }
         }
 
-        function clearFilters() {
-            document.getElementById('searchInput').value = '';
-            document.getElementById('dateFilter').value = '';
-            loadMessages();
+        function clearFiltersVJ() {
+            document.getElementById('vj-searchInput').value = '';
+            document.getElementById('vj-dateFilter').value = '';
+            loadVJMessages();
         }
 
+        // ========== TASTE BOT TAB ==========
+        let tbSubmissions = [];
+
+        async function loadTBSubmissions() {
+            try {
+                const params = new URLSearchParams();
+                const search = document.getElementById('tb-searchInput').value;
+                const contentType = document.getElementById('tb-contentTypeFilter').value;
+
+                if (search) params.append('search', search);
+                if (contentType) params.append('content_type', contentType);
+
+                const response = await fetch('/api/taste-bot/submissions?' + params);
+                tbSubmissions = await response.json();
+                renderTBSubmissions();
+            } catch (error) {
+                console.error('Failed to load submissions:', error);
+                document.getElementById('tb-submissionList').innerHTML =
+                    '<div class="empty">Failed to load submissions. Please refresh.</div>';
+            }
+        }
+
+        function renderTBSubmissions() {
+            const container = document.getElementById('tb-submissionList');
+            const stats = document.getElementById('tb-stats');
+
+            stats.textContent = \`\${tbSubmissions.length} submission\${tbSubmissions.length !== 1 ? 's' : ''}\`;
+
+            if (tbSubmissions.length === 0) {
+                container.innerHTML = '<div class="empty">No submissions found.</div>';
+                return;
+            }
+
+            container.innerHTML = tbSubmissions.map(sub => {
+                const annotations = sub.annotations || [];
+                const contentDisplay = getContentDisplay(sub);
+
+                return \`
+                    <div class="message-card" data-id="\${sub.id}">
+                        <div class="message-header">
+                            <div class="message-meta">
+                                <span>📅 \${formatDate(sub.created_at)}</span>
+                                <span>📁 \${sub.content_type}</span>
+                                <span>🆔 #\${sub.id}</span>
+                            </div>
+                            <div class="message-actions">
+                                <button onclick="deleteTBSubmission(\${sub.id})" class="danger">Delete</button>
+                            </div>
+                        </div>
+
+                        \${contentDisplay}
+
+                        \${sub.caption ? \`<div class="transcript">\${escapeHtml(sub.caption)}</div>\` : ''}
+
+                        <div style="margin-top: 15px;">
+                            <strong>🎤 Voice Annotations (\${annotations.length})</strong>
+                            \${annotations.map(ann => \`
+                                <div style="background: #0f172a; padding: 10px; margin-top: 10px; border-radius: 6px;">
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                                        <span style="color: #94a3b8; font-size: 13px;">
+                                            📅 \${formatDate(ann.created_at)} • ⏱️ \${formatDuration(ann.duration)} • 🔗 \${ann.link_type}
+                                        </span>
+                                        <button onclick="deleteTBAnnotation(\${ann.id}, \${sub.id})" class="danger" style="padding: 5px 10px; font-size: 12px;">Delete</button>
+                                    </div>
+                                    <audio controls preload="metadata" style="width: 100%; margin-bottom: 10px;">
+                                        <source src="/api/taste-bot/audio/\${ann.id}" type="audio/ogg">
+                                    </audio>
+                                    <div>\${escapeHtml(ann.transcript)}</div>
+                                </div>
+                            \`).join('')}
+                            \${annotations.length === 0 ? '<div style="color: #64748b; font-size: 14px; margin-top: 10px;">No voice annotations yet.</div>' : ''}
+                        </div>
+                    </div>
+                \`;
+            }).join('');
+        }
+
+        function getContentDisplay(sub) {
+            if (sub.content_type === 'url') {
+                return \`<div class="transcript"><a href="\${sub.url}" target="_blank" style="color: #60a5fa;">\${sub.url}</a></div>\`;
+            } else if (sub.content_type === 'photo') {
+                return \`<img src="/api/taste-bot/media/\${sub.id}" style="max-width: 100%; border-radius: 6px; margin-bottom: 10px;" />\`;
+            } else if (sub.content_type === 'video' || sub.content_type === 'gif') {
+                return \`<video controls style="max-width: 100%; border-radius: 6px; margin-bottom: 10px;">
+                    <source src="/api/taste-bot/media/\${sub.id}">
+                </video>\`;
+            } else if (sub.content_type === 'audio') {
+                return \`<audio controls preload="metadata" style="width: 100%; margin-bottom: 10px;">
+                    <source src="/api/taste-bot/media/\${sub.id}">
+                </audio>\`;
+            } else if (sub.content_type === 'document') {
+                return \`<div class="transcript">📄 \${sub.filename || 'Document'}</div>\`;
+            }
+            return '';
+        }
+
+        async function deleteTBSubmission(id) {
+            if (!confirm('Are you sure you want to delete this submission and all its annotations? This cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(\`/api/taste-bot/submissions/\${id}\`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) throw new Error('Failed to delete');
+
+                tbSubmissions = tbSubmissions.filter(s => s.id !== id);
+                renderTBSubmissions();
+            } catch (error) {
+                console.error('Failed to delete:', error);
+                alert('Failed to delete submission. Please try again.');
+            }
+        }
+
+        async function deleteTBAnnotation(annotationId, submissionId) {
+            if (!confirm('Are you sure you want to delete this annotation? This cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(\`/api/taste-bot/annotations/\${annotationId}\`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) throw new Error('Failed to delete');
+
+                // Update local data
+                const sub = tbSubmissions.find(s => s.id === submissionId);
+                if (sub) {
+                    sub.annotations = sub.annotations.filter(a => a.id !== annotationId);
+                }
+                renderTBSubmissions();
+            } catch (error) {
+                console.error('Failed to delete:', error);
+                alert('Failed to delete annotation. Please try again.');
+            }
+        }
+
+        function clearFiltersTB() {
+            document.getElementById('tb-searchInput').value = '';
+            document.getElementById('tb-contentTypeFilter').value = '';
+            loadTBSubmissions();
+        }
+
+        // ========== UTILITY FUNCTIONS ==========
         function formatDate(timestamp) {
             const date = new Date(timestamp * 1000);
             return date.toLocaleString('en-US', {
@@ -408,11 +641,15 @@ app.get('/', (req, res) => {
         }
 
         // Auto-search on input
-        document.getElementById('searchInput').addEventListener('input',
-            debounce(() => loadMessages(), 500)
+        document.getElementById('vj-searchInput').addEventListener('input',
+            debounce(() => loadVJMessages(), 500)
         );
+        document.getElementById('vj-dateFilter').addEventListener('change', loadVJMessages);
 
-        document.getElementById('dateFilter').addEventListener('change', loadMessages);
+        document.getElementById('tb-searchInput').addEventListener('input',
+            debounce(() => loadTBSubmissions(), 500)
+        );
+        document.getElementById('tb-contentTypeFilter').addEventListener('change', loadTBSubmissions);
 
         function debounce(func, wait) {
             let timeout;
@@ -427,15 +664,17 @@ app.get('/', (req, res) => {
         }
 
         // Load messages on page load
-        loadMessages();
+        loadVJMessages();
     </script>
 </body>
 </html>
   `);
 });
 
+// ========== VOICE JOURNAL API ENDPOINTS ==========
+
 // API endpoint to get messages with optional search and date filter
-app.get('/api/messages', (req, res) => {
+app.get('/api/voice-journal/messages', (req, res) => {
   try {
     const { search, date } = req.query;
     let query = 'SELECT id, message_id, transcript, created_at, duration, r2_key FROM transcripts';
@@ -461,7 +700,7 @@ app.get('/api/messages', (req, res) => {
 
     query += ' ORDER BY created_at DESC';
 
-    const stmt = db.prepare(query);
+    const stmt = voiceJournalDb.prepare(query);
     const messages = stmt.all(...params);
     res.json(messages);
   } catch (error) {
@@ -471,17 +710,17 @@ app.get('/api/messages', (req, res) => {
 });
 
 // API endpoint to stream audio
-app.get('/api/audio/:id', async (req, res) => {
+app.get('/api/voice-journal/audio/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const message = db.prepare('SELECT r2_key FROM transcripts WHERE id = ?').get(id);
+    const message = voiceJournalDb.prepare('SELECT r2_key FROM transcripts WHERE id = ?').get(id);
 
     if (!message || !message.r2_key) {
       return res.status(404).json({ error: 'Audio not found' });
     }
 
     const command = new GetObjectCommand({
-      Bucket: 'voice-journal',
+      Bucket: R2_BUCKET_NAME,
       Key: message.r2_key,
     });
 
@@ -496,7 +735,7 @@ app.get('/api/audio/:id', async (req, res) => {
 });
 
 // API endpoint to update transcript
-app.put('/api/messages/:id', async (req, res) => {
+app.put('/api/voice-journal/messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { transcript } = req.body;
@@ -506,7 +745,7 @@ app.put('/api/messages/:id', async (req, res) => {
     }
 
     // Update transcript
-    const updateStmt = db.prepare('UPDATE transcripts SET transcript = ? WHERE id = ?');
+    const updateStmt = voiceJournalDb.prepare('UPDATE transcripts SET transcript = ? WHERE id = ?');
     const result = updateStmt.run(transcript.trim(), id);
 
     if (result.changes === 0) {
@@ -520,7 +759,7 @@ app.put('/api/messages/:id', async (req, res) => {
         const embeddingBuffer = Buffer.alloc(embedding.length * 4);
         embedding.forEach((val, i) => embeddingBuffer.writeFloatLE(val, i * 4));
 
-        const embeddingStmt = db.prepare('UPDATE transcripts SET embedding = ? WHERE id = ?');
+        const embeddingStmt = voiceJournalDb.prepare('UPDATE transcripts SET embedding = ? WHERE id = ?');
         embeddingStmt.run(embeddingBuffer, id);
 
         console.log(`✓ Re-embedded transcript for message ${id}`);
@@ -538,26 +777,26 @@ app.put('/api/messages/:id', async (req, res) => {
 });
 
 // API endpoint to delete message
-app.delete('/api/messages/:id', async (req, res) => {
+app.delete('/api/voice-journal/messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
     // Get R2 key before deleting
-    const message = db.prepare('SELECT r2_key FROM transcripts WHERE id = ?').get(id);
+    const message = voiceJournalDb.prepare('SELECT r2_key FROM transcripts WHERE id = ?').get(id);
 
     if (!message) {
       return res.status(404).json({ error: 'Message not found' });
     }
 
     // Delete from database
-    const deleteStmt = db.prepare('DELETE FROM transcripts WHERE id = ?');
+    const deleteStmt = voiceJournalDb.prepare('DELETE FROM transcripts WHERE id = ?');
     deleteStmt.run(id);
 
     // Delete from R2
     if (message.r2_key) {
       try {
         const command = new DeleteObjectCommand({
-          Bucket: 'voice-journal',
+          Bucket: R2_BUCKET_NAME,
           Key: message.r2_key,
         });
         await r2Client.send(command);
@@ -572,6 +811,193 @@ app.delete('/api/messages/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting message:', error);
     res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
+// ========== TASTE BOT API ENDPOINTS ==========
+
+// API endpoint to get submissions with annotations
+app.get('/api/taste-bot/submissions', (req, res) => {
+  try {
+    const { search, content_type } = req.query;
+    let query = 'SELECT * FROM submissions';
+    const params = [];
+    const conditions = [];
+
+    if (search) {
+      conditions.push('(url LIKE ? OR caption LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (content_type) {
+      conditions.push('content_type = ?');
+      params.push(content_type);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY created_at DESC';
+
+    const stmt = tasteBotDb.prepare(query);
+    const submissions = stmt.all(...params);
+
+    // Add annotations for each submission
+    const annotationsStmt = tasteBotDb.prepare('SELECT * FROM annotations WHERE submission_id = ? ORDER BY created_at ASC');
+    submissions.forEach(sub => {
+      sub.annotations = annotationsStmt.all(sub.id);
+    });
+
+    res.json(submissions);
+  } catch (error) {
+    console.error('Error fetching submissions:', error);
+    res.status(500).json({ error: 'Failed to fetch submissions' });
+  }
+});
+
+// API endpoint to stream media from submissions
+app.get('/api/taste-bot/media/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const submission = tasteBotDb.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+
+    if (!submission || !submission.r2_key) {
+      return res.status(404).json({ error: 'Media not found' });
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: submission.r2_key,
+    });
+
+    const response = await r2Client.send(command);
+
+    // Set appropriate content type
+    const metadata = submission.metadata ? JSON.parse(submission.metadata) : {};
+    const contentType = metadata.mime_type || 'application/octet-stream';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Accept-Ranges', 'bytes');
+    response.Body.pipe(res);
+  } catch (error) {
+    console.error('Error streaming media:', error);
+    res.status(500).json({ error: 'Failed to stream media' });
+  }
+});
+
+// API endpoint to stream audio from annotations
+app.get('/api/taste-bot/audio/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const annotation = tasteBotDb.prepare('SELECT r2_key FROM annotations WHERE id = ?').get(id);
+
+    if (!annotation || !annotation.r2_key) {
+      return res.status(404).json({ error: 'Audio not found' });
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: annotation.r2_key,
+    });
+
+    const response = await r2Client.send(command);
+    res.setHeader('Content-Type', 'audio/ogg');
+    res.setHeader('Accept-Ranges', 'bytes');
+    response.Body.pipe(res);
+  } catch (error) {
+    console.error('Error streaming audio:', error);
+    res.status(500).json({ error: 'Failed to stream audio' });
+  }
+});
+
+// API endpoint to delete submission (cascades to annotations)
+app.delete('/api/taste-bot/submissions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get submission and all its annotations
+    const submission = tasteBotDb.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    const annotations = tasteBotDb.prepare('SELECT * FROM annotations WHERE submission_id = ?').all(id);
+
+    // Delete from database (CASCADE will delete annotations)
+    const deleteStmt = tasteBotDb.prepare('DELETE FROM submissions WHERE id = ?');
+    deleteStmt.run(id);
+
+    // Delete submission media from R2
+    if (submission.r2_key) {
+      try {
+        const command = new DeleteObjectCommand({
+          Bucket: R2_BUCKET_NAME,
+          Key: submission.r2_key,
+        });
+        await r2Client.send(command);
+        console.log(`✓ Deleted submission media from R2: ${submission.r2_key}`);
+      } catch (r2Error) {
+        console.error('Failed to delete submission media from R2:', r2Error);
+      }
+    }
+
+    // Delete annotation audio files from R2
+    for (const ann of annotations) {
+      if (ann.r2_key) {
+        try {
+          const command = new DeleteObjectCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: ann.r2_key,
+          });
+          await r2Client.send(command);
+          console.log(`✓ Deleted annotation audio from R2: ${ann.r2_key}`);
+        } catch (r2Error) {
+          console.error('Failed to delete annotation audio from R2:', r2Error);
+        }
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting submission:', error);
+    res.status(500).json({ error: 'Failed to delete submission' });
+  }
+});
+
+// API endpoint to delete annotation
+app.delete('/api/taste-bot/annotations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get annotation
+    const annotation = tasteBotDb.prepare('SELECT * FROM annotations WHERE id = ?').get(id);
+    if (!annotation) {
+      return res.status(404).json({ error: 'Annotation not found' });
+    }
+
+    // Delete from database
+    const deleteStmt = tasteBotDb.prepare('DELETE FROM annotations WHERE id = ?');
+    deleteStmt.run(id);
+
+    // Delete audio from R2
+    if (annotation.r2_key) {
+      try {
+        const command = new DeleteObjectCommand({
+          Bucket: R2_BUCKET_NAME,
+          Key: annotation.r2_key,
+        });
+        await r2Client.send(command);
+        console.log(`✓ Deleted annotation audio from R2: ${annotation.r2_key}`);
+      } catch (r2Error) {
+        console.error('Failed to delete annotation audio from R2:', r2Error);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting annotation:', error);
+    res.status(500).json({ error: 'Failed to delete annotation' });
   }
 });
 
