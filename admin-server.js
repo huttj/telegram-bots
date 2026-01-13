@@ -2,11 +2,11 @@ import express from 'express';
 import basicAuth from 'express-basic-auth';
 import Database from 'better-sqlite3';
 import { S3Client, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { generateEmbedding } from './embeddings.js';
+import { embed } from './embeddings.js';
 
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '80', 10);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const DB_PATH = process.env.NODE_ENV === 'production' ? '/data/voice-journal.db' : 'voice-journal.db';
+const DB_PATH = process.env.FLY_APP_NAME ? '/data/voice-journal.db' : 'voice-journal.db';
 
 if (!ADMIN_PASSWORD) {
   console.warn('⚠️  Warning: ADMIN_PASSWORD not set. Admin interface will be disabled.');
@@ -516,7 +516,7 @@ app.put('/api/messages/:id', async (req, res) => {
     // Re-generate embedding if embeddings are enabled
     if (process.env.OPENROUTER_API_KEY) {
       try {
-        const embedding = await generateEmbedding(transcript.trim());
+        const embedding = await embed(transcript.trim());
         const embeddingBuffer = Buffer.alloc(embedding.length * 4);
         embedding.forEach((val, i) => embeddingBuffer.writeFloatLE(val, i * 4));
 
