@@ -28,6 +28,7 @@ This enables both immediate annotation AND post-hoc labeling/elaboration.
 - Transcribe voice memos (Groq Whisper, same as Voice Journal)
 - Generate embeddings for transcripts (OpenRouter, same as Voice Journal)
 - Store transcript, embedding, and date
+- Use same hardcoded auth/userId restriction as Voice Journal
 
 ## Technical Architecture
 
@@ -111,15 +112,13 @@ telegram-bots/
 7. User feedback (reactions + confirmations)
 
 ### Phase 4: Admin Interface
-1. Create taste-bot-admin.js (port 8080)
-2. API endpoints for submissions
-3. API endpoints for annotations
+1. Create taste-bot-admin.js (add as tab to existing Admin interface, keep password protected)
 4. HTML interface with cards
-5. Media streaming from R2
+5. Media streaming from R2 (see if you can fix the length preview so it shows how long audio and video are and seeking works correctly)
 
 ### Phase 5: Deployment
 1. Update Dockerfile
-2. Create taste-bot.fly.toml
+2. Create taste-bot.fly.toml (can't this be run alongside voice journal? I don't want it to be a different machine...)
 3. Update Litestream config
 4. Deploy to Fly.io
 5. End-to-end testing
@@ -129,11 +128,10 @@ telegram-bots/
 ```bash
 # Taste Bot
 TASTE_BOT_TOKEN=...
-TASTE_BOT_AUTHORIZED_USER_ID=...
-TASTE_BOT_ADMIN_PORT=8080
+TASTE_BOT_AUTHORIZED_USER_ID=... // SAME ID GLOBABLLY; update code to share one ID and I'll update the ENV)
 
 # Shared (R2, Groq, OpenRouter)
-R2_ACCOUNT_ID=...
+R2_ACCOUNT_ID=... // Shared with the other one
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_BUCKET_NAME=telegram-bots
@@ -145,6 +143,7 @@ OPENROUTER_API_KEY=...
 
 - Media download & archival (scrape YouTube, Instagram, etc.)
 - LLM-powered categorization/tagging
+- LLM image and media content descriptions (could also be sourced from the site if from a URL)
 - Semantic search across annotations
 - Export/sharing features
 
