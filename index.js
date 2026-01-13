@@ -23,7 +23,8 @@ import {
   formatDuration,
   createAuthMiddleware
 } from './lib/telegram-helpers.js';
-import { startTasteBot } from './taste-bot.js';
+// Taste Bot temporarily disabled to reduce connection load
+// import { startTasteBot } from './taste-bot.js';
 
 // Load environment variables
 config();
@@ -543,21 +544,21 @@ if (WEBHOOK_DOMAIN) {
 
   console.log(`✓ Voice Journal Bot started with webhook: ${WEBHOOK_DOMAIN}${voiceJournalWebhookPath}`);
 
-  // Start Taste Bot with webhook
-  const tasteBotWebhookPath = `/webhook/taste-bot/${randomUUID()}`;
-  startTasteBot({
-    domain: WEBHOOK_DOMAIN,
-    port: PORT,
-    path: tasteBotWebhookPath,
-  });
-  console.log(`✓ Taste Bot started with webhook: ${WEBHOOK_DOMAIN}${tasteBotWebhookPath}`);
+  // Taste Bot temporarily disabled to reduce connection load
+  // const tasteBotWebhookPath = `/webhook/taste-bot/${randomUUID()}`;
+  // startTasteBot({
+  //   domain: WEBHOOK_DOMAIN,
+  //   port: PORT,
+  //   path: tasteBotWebhookPath,
+  // });
+  // console.log(`✓ Taste Bot started with webhook: ${WEBHOOK_DOMAIN}${tasteBotWebhookPath}`);
 } else {
   // Use polling for development
   bot.launch();
   console.log('✓ Voice Journal Bot started with polling (development mode)');
 
-  // Start Taste Bot with polling
-  startTasteBot();
+  // Taste Bot temporarily disabled to reduce connection load
+  // startTasteBot();
 }
 
 // Enable graceful stop
@@ -565,5 +566,5 @@ process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 console.log('✓ Voice Journal Bot is running!');
-console.log('✓ Taste Bot is running!');
+// console.log('✓ Taste Bot is running!');
 console.log(`✓ Authorized user ID: ${AUTHORIZED_USER_ID}`);
