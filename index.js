@@ -1,16 +1,29 @@
 import { Telegraf } from 'telegraf';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import Groq from 'groq-sdk';
 import OpenAI from 'openai';
 import Database from 'better-sqlite3';
 import { config } from 'dotenv';
-import { createWriteStream, createReadStream, unlinkSync } from 'fs';
-import { pipeline } from 'stream/promises';
+import { unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
-import https from 'https';
-import http from 'http';
 import { embed } from './embeddings.js';
 import { startAdminServer } from './admin-server.js';
+import { initializeR2Client, uploadFileToR2 } from './lib/r2-client.js';
+import { initializeGroqClient, transcribeAudio } from './lib/transcription.js';
+import {
+  initializeEmbeddingModel,
+  isEmbeddingModelReady,
+  generateEmbedding,
+  embeddingToBuffer,
+  bufferToEmbedding,
+  cosineSimilarity,
+  backfillEmbeddings
+} from './lib/embedding-utils.js';
+import {
+  downloadTelegramFile,
+  formatTimestamp,
+  formatDuration,
+  createAuthMiddleware
+} from './lib/telegram-helpers.js';
+import { startTasteBot } from './taste-bot.js';
 
 // Load environment variables
 config();
@@ -76,23 +89,14 @@ try {
 }
 
 // Initialize R2 client (S3-compatible)
-let r2Client = null;
-if (R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY) {
-  r2Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: R2_ACCESS_KEY_ID,
-      secretAccessKey: R2_SECRET_ACCESS_KEY,
-    },
-  });
-  console.log('✓ R2 storage initialized');
-} else {
-  console.warn('⚠ R2 credentials not found - voice files will not be uploaded to cloud storage');
-}
+initializeR2Client({
+  accountId: R2_ACCOUNT_ID,
+  accessKeyId: R2_ACCESS_KEY_ID,
+  secretAccessKey: R2_SECRET_ACCESS_KEY,
+});
 
-// Initialize AI clients
-const groq = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+// Initialize Groq for transcription
+initializeGroqClient(GROQ_API_KEY);
 
 const openrouter = new OpenAI({
   apiKey: OPENROUTER_API_KEY,
@@ -104,169 +108,18 @@ const aiClient = openrouter;
 console.log('✓ Using OpenRouter for AI inference');
 
 // Initialize embedding model
-let embeddingModelReady = false;
-console.log('Initializing embedding model...');
-(async () => {
-  try {
-    // Test that embedding function works
-    await embed('test');
-    embeddingModelReady = true;
-    console.log('✓ Embedding model initialized');
-
+initializeEmbeddingModel().then(async (success) => {
+  if (success) {
     // Backfill embeddings for existing transcripts
-    await backfillEmbeddings();
-  } catch (err) {
-    console.error('Failed to initialize embedding model:', err);
+    await backfillEmbeddings(db, 'transcripts', 'transcript');
   }
-})();
+});
 
 // Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
 // Middleware: Check if user is authorized
-bot.use((ctx, next) => {
-  if (ctx.from?.id !== AUTHORIZED_USER_ID) {
-    console.log(`❌ Unauthorized access attempt from user ${ctx.from?.id}`);
-    return; // Silently ignore unauthorized users
-  }
-  console.log(`✓ User authorized: ${ctx.from.id}`);
-  return next();
-});
-
-// Helper: Download file from Telegram
-async function downloadTelegramFile(fileId) {
-  const file = await bot.telegram.getFile(fileId);
-  const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-  const tempPath = `/tmp/${randomUUID()}.ogg`;
-
-  return new Promise((resolve, reject) => {
-    const fileStream = createWriteStream(tempPath);
-    const protocol = fileUrl.startsWith('https') ? https : http;
-
-    protocol.get(fileUrl, (response) => {
-      response.pipe(fileStream);
-      fileStream.on('finish', () => {
-        fileStream.close();
-        resolve(tempPath);
-      });
-    }).on('error', (err) => {
-      unlinkSync(tempPath);
-      reject(err);
-    });
-  });
-}
-
-// Helper: Upload file to R2
-async function uploadToR2(filePath, key) {
-  if (!r2Client) {
-    console.log('R2 not configured, skipping upload');
-    return null;
-  }
-
-  try {
-    const fileStream = createReadStream(filePath);
-    const command = new PutObjectCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      Body: fileStream,
-      ContentType: 'audio/ogg',
-    });
-
-    await r2Client.send(command);
-    console.log(`✓ Uploaded to R2: ${key}`);
-    return key;
-  } catch (error) {
-    console.error('Error uploading to R2:', error);
-    return null;
-  }
-}
-
-// Helper: Format Unix timestamp to readable filename format
-function formatTimestamp(unixTimestamp) {
-  const date = new Date(unixTimestamp * 1000);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
-}
-
-// Helper: Format duration as "1m 3s" or "55s"
-function formatDuration(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-
-  if (minutes > 0) {
-    return `${minutes}m ${remainingSeconds}s`;
-  } else {
-    return `${remainingSeconds}s`;
-  }
-}
-
-// Helper: Transcribe audio with Groq Whisper
-async function transcribeAudio(filePath) {
-  if (!groq) {
-    throw new Error('Groq API key required for audio transcription. Please set GROQ_API_KEY in your environment variables.');
-  }
-
-  try {
-    const transcription = await groq.audio.transcriptions.create({
-      file: createReadStream(filePath),
-      model: 'whisper-large-v3-turbo',
-      response_format: 'json',
-      language: 'en', // Change if needed, or remove to auto-detect
-    });
-
-    return transcription.text;
-  } catch (error) {
-    console.error('Error transcribing audio:', error);
-    throw error;
-  }
-}
-
-// Helper: Generate embedding for text
-async function generateEmbedding(text) {
-  if (!embeddingModelReady) {
-    throw new Error('Embedding model not initialized');
-  }
-  const embedding = await embed(text);
-  return embedding;
-}
-
-// Helper: Calculate cosine similarity between two vectors
-function cosineSimilarity(vecA, vecB) {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-// Helper: Convert embedding array to buffer for storage
-function embeddingToBuffer(embedding) {
-  const buffer = Buffer.allocUnsafe(embedding.length * 4);
-  for (let i = 0; i < embedding.length; i++) {
-    buffer.writeFloatLE(embedding[i], i * 4);
-  }
-  return buffer;
-}
-
-// Helper: Convert buffer to embedding array
-function bufferToEmbedding(buffer) {
-  const embedding = [];
-  for (let i = 0; i < buffer.length; i += 4) {
-    embedding.push(buffer.readFloatLE(i));
-  }
-  return embedding;
-}
+bot.use(createAuthMiddleware(AUTHORIZED_USER_ID));
 
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
@@ -451,7 +304,7 @@ function applyDateFilter(transcripts, dateFilter) {
 
 // Helper: Perform vector similarity search
 async function vectorSearch(queryText, topK = 5, dateFilter = null) {
-  if (!embeddingModelReady) {
+  if (!isEmbeddingModelReady()) {
     throw new Error('Embedding model not initialized');
   }
 
@@ -518,42 +371,6 @@ Respond naturally to the question. Match the level of detail and thoroughness re
   }
 }
 
-// Helper: Backfill embeddings for existing transcripts
-async function backfillEmbeddings() {
-  if (!embeddingModelReady) {
-    console.log('Embedding model not ready, skipping backfill');
-    return;
-  }
-
-  try {
-    const stmt = db.prepare('SELECT id, transcript FROM transcripts WHERE embedding IS NULL');
-    const transcriptsWithoutEmbeddings = stmt.all();
-
-    if (transcriptsWithoutEmbeddings.length === 0) {
-      console.log('✓ All transcripts already have embeddings');
-      return;
-    }
-
-    console.log(`Backfilling embeddings for ${transcriptsWithoutEmbeddings.length} transcripts...`);
-
-    const updateStmt = db.prepare('UPDATE transcripts SET embedding = ? WHERE id = ?');
-
-    for (const transcript of transcriptsWithoutEmbeddings) {
-      try {
-        const embedding = await generateEmbedding(transcript.transcript);
-        const embeddingBuffer = embeddingToBuffer(embedding);
-        updateStmt.run(embeddingBuffer, transcript.id);
-      } catch (error) {
-        console.error(`Error generating embedding for transcript ${transcript.id}:`, error);
-      }
-    }
-
-    console.log(`✓ Backfilled embeddings for ${transcriptsWithoutEmbeddings.length} transcripts`);
-  } catch (error) {
-    console.error('Error backfilling embeddings:', error);
-  }
-}
-
 // Handle voice messages
 bot.on('voice', async (ctx) => {
   const voice = ctx.message.voice;
@@ -573,19 +390,19 @@ bot.on('voice', async (ctx) => {
     }
 
     // Download voice file from Telegram
-    const tempFilePath = await downloadTelegramFile(voice.file_id);
+    const tempFilePath = await downloadTelegramFile(voice.file_id, TELEGRAM_BOT_TOKEN, 'ogg');
 
     // Upload to R2
     const formattedTimestamp = formatTimestamp(timestamp);
     const r2Key = `voice-journal/voice-notes/${formattedTimestamp}-${messageId}.ogg`;
-    const uploadedKey = await uploadToR2(tempFilePath, r2Key);
+    const uploadedKey = await uploadFileToR2(tempFilePath, r2Key, R2_BUCKET_NAME, 'audio/ogg');
 
     // Transcribe with Groq
     const transcript = await transcribeAudio(tempFilePath);
 
     // Generate embedding for transcript
     let embeddingBuffer = null;
-    if (embeddingModelReady) {
+    if (isEmbeddingModelReady()) {
       try {
         const embedding = await generateEmbedding(transcript);
         embeddingBuffer = embeddingToBuffer(embedding);
@@ -623,7 +440,7 @@ bot.on('text', async (ctx) => {
 
   try {
     // Check if embedding model is ready
-    if (!embeddingModelReady) {
+    if (!isEmbeddingModelReady()) {
       await ctx.reply('⚠️ The embedding model is still initializing. Please try again in a moment.');
       return;
     }
@@ -709,26 +526,38 @@ bot.command('stats', (ctx) => {
 // Start the admin server
 startAdminServer().catch(err => console.error('Failed to start admin server:', err));
 
-// Start the bot
+// Start the Voice Journal Bot
 console.log('Starting Voice Journal Bot...');
 
 if (WEBHOOK_DOMAIN) {
   // Use webhooks for production
-  const webhookPath = `/webhook/${randomUUID()}`;
+  const voiceJournalWebhookPath = `/webhook/voice-journal/${randomUUID()}`;
 
   bot.launch({
     webhook: {
       domain: WEBHOOK_DOMAIN,
       port: PORT,
-      path: webhookPath,
+      path: voiceJournalWebhookPath,
     },
   });
 
-  console.log(`✓ Bot started with webhook: ${WEBHOOK_DOMAIN}${webhookPath}`);
+  console.log(`✓ Voice Journal Bot started with webhook: ${WEBHOOK_DOMAIN}${voiceJournalWebhookPath}`);
+
+  // Start Taste Bot with webhook
+  const tasteBotWebhookPath = `/webhook/taste-bot/${randomUUID()}`;
+  startTasteBot({
+    domain: WEBHOOK_DOMAIN,
+    port: PORT,
+    path: tasteBotWebhookPath,
+  });
+  console.log(`✓ Taste Bot started with webhook: ${WEBHOOK_DOMAIN}${tasteBotWebhookPath}`);
 } else {
   // Use polling for development
   bot.launch();
-  console.log('✓ Bot started with polling (development mode)');
+  console.log('✓ Voice Journal Bot started with polling (development mode)');
+
+  // Start Taste Bot with polling
+  startTasteBot();
 }
 
 // Enable graceful stop
@@ -736,4 +565,5 @@ process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 console.log('✓ Voice Journal Bot is running!');
+console.log('✓ Taste Bot is running!');
 console.log(`✓ Authorized user ID: ${AUTHORIZED_USER_ID}`);
