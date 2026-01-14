@@ -1,10 +1,9 @@
 import { Telegraf } from 'telegraf';
-import OpenAI from 'openai';
 import Database from 'better-sqlite3';
 import { config } from 'dotenv';
 import { unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { embed } from './embeddings.js';
+import { openrouter } from './embeddings.js';
 import { startAdminServer } from './admin-server.js';
 import { initializeR2Client, uploadFileToR2 } from './lib/r2-client.js';
 import { initializeGroqClient, transcribeAudio } from './lib/transcription.js';
@@ -99,14 +98,9 @@ initializeR2Client({
 // Initialize Groq for transcription
 initializeGroqClient(GROQ_API_KEY);
 
-const openrouter = new OpenAI({
-  apiKey: OPENROUTER_API_KEY,
-  baseURL: 'https://openrouter.ai/api/v1',
-});
-
-// Use OpenRouter as primary AI client, fallback to Groq for transcription if available
+// Use shared OpenRouter client (singleton) to avoid duplicate connection pools
 const aiClient = openrouter;
-console.log('✓ Using OpenRouter for AI inference');
+console.log('✓ Using shared OpenRouter client for AI inference');
 
 // Initialize embedding model
 initializeEmbeddingModel().then(async (success) => {
@@ -561,10 +555,33 @@ if (WEBHOOK_DOMAIN) {
   // startTasteBot();
 }
 
-// Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Connection pool monitoring
+function logActiveConnections() {
+  const handles = process._getActiveHandles();
+  const requests = process._getActiveRequests();
+  console.log(`📊 Active handles: ${handles.length}, Active requests: ${requests.length}`);
+}
+
+// Log connection stats every 5 minutes
+setInterval(logActiveConnections, 5 * 60 * 1000);
+
+// Enable graceful stop with connection monitoring
+process.once('SIGINT', () => {
+  console.log('Received SIGINT, shutting down gracefully...');
+  logActiveConnections();
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully...');
+  logActiveConnections();
+  bot.stop('SIGTERM');
+});
 
 console.log('✓ Voice Journal Bot is running!');
 // console.log('✓ Taste Bot is running!');
 console.log(`✓ Authorized user ID: ${AUTHORIZED_USER_ID}`);
+console.log('📊 Connection pool monitoring enabled (logs every 5 minutes)');
+
+// Initial connection stats
+setTimeout(logActiveConnections, 5000);

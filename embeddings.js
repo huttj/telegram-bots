@@ -1,10 +1,13 @@
 import OpenAI from 'openai';
 
-// Initialize OpenRouter client with OpenAI SDK
+// Initialize OpenRouter client with OpenAI SDK (singleton for shared connection pooling)
 const openrouter = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: 'https://openrouter.ai/api/v1',
 });
+
+// Export the client for reuse to avoid multiple connection pools
+export { openrouter };
 
 // Using OpenAI's text-embedding-3-small model through OpenRouter
 const EMBEDDING_MODEL = 'openai/text-embedding-3-small';

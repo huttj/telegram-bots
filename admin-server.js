@@ -1,8 +1,9 @@
 import express from 'express';
 import basicAuth from 'express-basic-auth';
 import Database from 'better-sqlite3';
-import { S3Client, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { embed } from './embeddings.js';
+import { getR2Client } from './lib/r2-client.js';
 
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '80', 10);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -18,15 +19,8 @@ if (!ADMIN_PASSWORD) {
 const voiceJournalDb = new Database(VOICE_JOURNAL_DB_PATH);
 const tasteBotDb = new Database(TASTE_BOT_DB_PATH);
 
-// Initialize S3/R2 client
-const r2Client = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
+// Reuse shared R2 client instance to avoid connection pool duplication
+const r2Client = getR2Client();
 
 const app = express();
 app.use(express.json());
