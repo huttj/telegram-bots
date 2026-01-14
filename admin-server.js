@@ -19,8 +19,8 @@ if (!ADMIN_PASSWORD) {
 const voiceJournalDb = new Database(VOICE_JOURNAL_DB_PATH);
 const tasteBotDb = new Database(TASTE_BOT_DB_PATH);
 
-// Reuse shared R2 client instance to avoid connection pool duplication
-const r2Client = getR2Client();
+// Note: R2 client is lazily accessed via getR2Client() when needed
+// (it's initialized later in index.js after this module loads)
 
 const app = express();
 app.use(express.json());
@@ -718,6 +718,11 @@ app.get('/api/voice-journal/audio/:id', async (req, res) => {
       Key: message.r2_key,
     });
 
+    const r2Client = getR2Client();
+    if (!r2Client) {
+      return res.status(503).json({ error: 'Storage service not available' });
+    }
+
     const response = await r2Client.send(command);
     res.setHeader('Content-Type', 'audio/ogg');
     res.setHeader('Accept-Ranges', 'bytes');
@@ -789,12 +794,15 @@ app.delete('/api/voice-journal/messages/:id', async (req, res) => {
     // Delete from R2
     if (message.r2_key) {
       try {
-        const command = new DeleteObjectCommand({
-          Bucket: R2_BUCKET_NAME,
-          Key: message.r2_key,
-        });
-        await r2Client.send(command);
-        console.log(`✓ Deleted audio file from R2: ${message.r2_key}`);
+        const r2Client = getR2Client();
+        if (r2Client) {
+          const command = new DeleteObjectCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: message.r2_key,
+          });
+          await r2Client.send(command);
+          console.log(`✓ Deleted audio file from R2: ${message.r2_key}`);
+        }
       } catch (r2Error) {
         console.error('Failed to delete from R2:', r2Error);
         // Continue anyway - database record was deleted
@@ -865,6 +873,11 @@ app.get('/api/taste-bot/media/:id', async (req, res) => {
       Key: submission.r2_key,
     });
 
+    const r2Client = getR2Client();
+    if (!r2Client) {
+      return res.status(503).json({ error: 'Storage service not available' });
+    }
+
     const response = await r2Client.send(command);
 
     // Set appropriate content type
@@ -895,6 +908,11 @@ app.get('/api/taste-bot/audio/:id', async (req, res) => {
       Key: annotation.r2_key,
     });
 
+    const r2Client = getR2Client();
+    if (!r2Client) {
+      return res.status(503).json({ error: 'Storage service not available' });
+    }
+
     const response = await r2Client.send(command);
     res.setHeader('Content-Type', 'audio/ogg');
     res.setHeader('Accept-Ranges', 'bytes');
@@ -923,7 +941,8 @@ app.delete('/api/taste-bot/submissions/:id', async (req, res) => {
     deleteStmt.run(id);
 
     // Delete submission media from R2
-    if (submission.r2_key) {
+    const r2Client = getR2Client();
+    if (submission.r2_key && r2Client) {
       try {
         const command = new DeleteObjectCommand({
           Bucket: R2_BUCKET_NAME,
@@ -937,17 +956,19 @@ app.delete('/api/taste-bot/submissions/:id', async (req, res) => {
     }
 
     // Delete annotation audio files from R2
-    for (const ann of annotations) {
-      if (ann.r2_key) {
-        try {
-          const command = new DeleteObjectCommand({
-            Bucket: R2_BUCKET_NAME,
-            Key: ann.r2_key,
-          });
-          await r2Client.send(command);
-          console.log(`✓ Deleted annotation audio from R2: ${ann.r2_key}`);
-        } catch (r2Error) {
-          console.error('Failed to delete annotation audio from R2:', r2Error);
+    if (r2Client) {
+      for (const ann of annotations) {
+        if (ann.r2_key) {
+          try {
+            const command = new DeleteObjectCommand({
+              Bucket: R2_BUCKET_NAME,
+              Key: ann.r2_key,
+            });
+            await r2Client.send(command);
+            console.log(`✓ Deleted annotation audio from R2: ${ann.r2_key}`);
+          } catch (r2Error) {
+            console.error('Failed to delete annotation audio from R2:', r2Error);
+          }
         }
       }
     }
@@ -977,12 +998,15 @@ app.delete('/api/taste-bot/annotations/:id', async (req, res) => {
     // Delete audio from R2
     if (annotation.r2_key) {
       try {
-        const command = new DeleteObjectCommand({
-          Bucket: R2_BUCKET_NAME,
-          Key: annotation.r2_key,
-        });
-        await r2Client.send(command);
-        console.log(`✓ Deleted annotation audio from R2: ${annotation.r2_key}`);
+        const r2Client = getR2Client();
+        if (r2Client) {
+          const command = new DeleteObjectCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: annotation.r2_key,
+          });
+          await r2Client.send(command);
+          console.log(`✓ Deleted annotation audio from R2: ${annotation.r2_key}`);
+        }
       } catch (r2Error) {
         console.error('Failed to delete annotation audio from R2:', r2Error);
       }
