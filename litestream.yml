@@ -15,18 +15,19 @@ dbs:
         # Validate backups
         validation-interval: 1h
 
-  - path: /data/taste-bot.db
-    replicas:
-      - type: s3
-        bucket: ${R2_BUCKET_NAME}
-        path: taste-bot/db
-        endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
-        access-key-id: ${R2_ACCESS_KEY_ID}
-        secret-access-key: ${R2_SECRET_ACCESS_KEY}
-        region: auto
-        # Backup every 10 seconds when there are changes
-        sync-interval: 10s
-        # Keep snapshots for 7 days
-        retention: 168h
-        # Validate backups
-        validation-interval: 1h
+  # Taste Bot database temporarily disabled to reduce connection load
+  # - path: /data/taste-bot.db
+  #   replicas:
+  #     - type: s3
+  #       bucket: ${R2_BUCKET_NAME}
+  #       path: taste-bot/db
+  #       endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+  #       access-key-id: ${R2_ACCESS_KEY_ID}
+  #       secret-access-key: ${R2_SECRET_ACCESS_KEY}
+  #       region: auto
+  #       # Backup every 10 seconds when there are changes
+  #       sync-interval: 10s
+  #       # Keep snapshots for 7 days
+  #       retention: 168h
+  #       # Validate backups
+  #       validation-interval: 1h
