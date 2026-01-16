@@ -125,9 +125,12 @@ bot.use(createAuthMiddleware(AUTHORIZED_USER_ID));
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
   const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
-  const prompt = `Classify this voice journal query and extract date filters. Today's date is ${currentDate}.
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0]; // Yesterday's date
+  const prompt = `Classify this voice journal query and extract date filters. Today's date is ${currentDate}. Yesterday's date is ${yesterday}.
 
 User query: "${userQuery}"
+
+CRITICAL: If the user specifies an explicit date in parentheses like "(1/14)" or "(January 14)", ALWAYS use that explicit date, even if they also mention relative terms like "yesterday" or "today". The explicit date takes priority.
 
 STEP 1 - Check for time references and extract specific dates:
 
@@ -138,8 +141,9 @@ Quick time references:
 - "this year" / "year" → type: "year"
 
 Specific date references (return as dateFilter array):
-- "yesterday" → [{date: "YYYY-MM-DD"}] (calculate yesterday's date)
-- "January 15" / "Jan 15" → [{date: "YYYY-MM-DD"}] (infer current year if not specified)
+- "yesterday" → [{date: "${yesterday}"}] (yesterday's date)
+- "yesterday (1/14)" / "yesterday (January 14)" → [{date: "YYYY-01-14"}] (USE THE EXPLICIT DATE IN PARENTHESES)
+- "January 15" / "Jan 15" / "1/15" → [{date: "YYYY-MM-DD"}] (infer current year if not specified)
 - "2026-01-15" / "01/15/2026" → [{date: "2026-01-15"}]
 - "last Monday" / "last week Tuesday" → [{date: "YYYY-MM-DD"}] (calculate the specific date)
 
@@ -161,7 +165,9 @@ STEP 2 - If NO time reference, it's a semantic search:
 
 Examples:
 "What did I say today?" → type: "today", dateFilter: null
-"What did I say yesterday?" → type: "semantic", dateFilter: [{date: "2026-01-15"}]
+"What did I say yesterday?" → type: "semantic", dateFilter: [{date: "${yesterday}"}]
+"yesterday (1/14)" → type: "semantic", dateFilter: [{date: "2026-01-14"}]
+"Can you give me a rating for yesterday (1/14)?" → type: "semantic", searchTerms: "I rating rate", dateFilter: [{date: "2026-01-14"}]
 "Show me January 15" → type: "semantic", dateFilter: [{date: "2026-01-15"}]
 "entries from Jan 1 to Jan 15" → type: "semantic", dateFilter: [{start: "2026-01-01", end: "2026-01-15"}]
 "What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am", dateFilter: null
