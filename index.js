@@ -132,51 +132,51 @@ User query: "${userQuery}"
 
 CRITICAL: If the user specifies an explicit date in parentheses like "(1/14)" or "(January 14)", ALWAYS use that explicit date, even if they also mention relative terms like "yesterday" or "today". The explicit date takes priority.
 
-STEP 1 - Check for time references and extract specific dates:
+STEP 1 - Determine query type:
 
-Quick time references:
+DATE-FOCUSED queries (user wants ALL entries from a specific date/range):
 - "today" → type: "today"
 - "this week" / "week" → type: "week"
 - "this month" / "month" → type: "month"
 - "this year" / "year" → type: "year"
+- "yesterday" / "yesterday (1/14)" → type: "date_specific", dateFilter: [{date: "YYYY-MM-DD"}]
+- "show me January 15" / "what happened on 1/15" → type: "date_specific", dateFilter: [{date: "YYYY-MM-DD"}]
+- "give me a rating for yesterday" → type: "date_specific", dateFilter: [{date: "${yesterday}"}]
+- "entries from Jan 1 to Jan 15" → type: "date_specific", dateFilter: [{start: "...", end: "..."}]
 
-Specific date references (return as dateFilter array):
-- "yesterday" → [{date: "${yesterday}"}] (yesterday's date)
-- "yesterday (1/14)" / "yesterday (January 14)" → [{date: "YYYY-01-14"}] (USE THE EXPLICIT DATE IN PARENTHESES)
-- "January 15" / "Jan 15" / "1/15" → [{date: "YYYY-MM-DD"}] (infer current year if not specified)
-- "2026-01-15" / "01/15/2026" → [{date: "2026-01-15"}]
-- "last Monday" / "last week Tuesday" → [{date: "YYYY-MM-DD"}] (calculate the specific date)
+TOPIC-FOCUSED queries (user wants specific content, optionally filtered by date):
+- "what did I say about coffee" → type: "semantic", searchTerms: "coffee"
+- "what did I talk about coffee yesterday" → type: "semantic", searchTerms: "coffee", dateFilter: [{date: "..."}]
+- "how have I been feeling last week" → type: "semantic", searchTerms: "I feel feeling", dateFilter: [{start: "...", end: "..."}]
+- "what's your impression of me" → type: "semantic", searchTerms: "I feel I think I am"
 
-Date ranges (return as dateFilter array):
-- "from Jan 1 to Jan 15" → [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}]
-- "between 2026-01-01 and 2026-01-15" → [{start: "2026-01-01", end: "2026-01-15"}]
-- "last week" → [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}] (previous week's start/end)
-- "January" / "January 2026" → [{start: "2026-01-01", end: "2026-02-01"}]
+Key distinction:
+- If the query is ABOUT a date ("show me X date", "what happened on X", "rate X date"), use type: "date_specific"
+- If the query is ABOUT a topic with optional date constraint, use type: "semantic"
 
-Multiple dates/ranges:
-- "January 15 and January 20" → [{date: "YYYY-MM-DD"}, {date: "YYYY-MM-DD"}]
-- "last Monday and yesterday" → [{date: "YYYY-MM-DD"}, {date: "YYYY-MM-DD"}]
-- "from Jan 1-5 and Jan 10-15" → [{start: "...", end: "..."}, {start: "...", end: "..."}]
-
-STEP 2 - If NO time reference, it's a semantic search:
-- type: "semantic"
-- For introspective/analytical questions (about feelings, personality, patterns, impressions), use first-person phrases that appear in journal entries: "I feel" "I think" "I am" "I want" "I need"
-- For questions about specific topics, use those topic keywords
+Date format examples:
+- "yesterday" → [{date: "${yesterday}"}]
+- "yesterday (1/14)" → [{date: "2026-01-14"}] (USE THE EXPLICIT DATE)
+- "January 15" / "1/15" → [{date: "2026-01-15"}]
+- "from Jan 1 to Jan 15" → [{start: "2026-01-01", end: "2026-01-15"}]
+- "January 15 and January 20" → [{date: "2026-01-15"}, {date: "2026-01-20"}]
+- "last week" → [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}]
 
 Examples:
 "What did I say today?" → type: "today", dateFilter: null
-"What did I say yesterday?" → type: "semantic", dateFilter: [{date: "${yesterday}"}]
-"yesterday (1/14)" → type: "semantic", dateFilter: [{date: "2026-01-14"}]
-"Can you give me a rating for yesterday (1/14)?" → type: "semantic", searchTerms: "I rating rate", dateFilter: [{date: "2026-01-14"}]
-"Show me January 15" → type: "semantic", dateFilter: [{date: "2026-01-15"}]
-"entries from Jan 1 to Jan 15" → type: "semantic", dateFilter: [{start: "2026-01-01", end: "2026-01-15"}]
-"What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am", dateFilter: null
-"What did I talk about coffee last week?" → type: "semantic", searchTerms: "coffee", dateFilter: [{start: "2026-01-05", end: "2026-01-12"}]
+"What did I say yesterday?" → type: "date_specific", dateFilter: [{date: "${yesterday}"}]
+"yesterday (1/14)" → type: "date_specific", dateFilter: [{date: "2026-01-14"}]
+"Can you give me a rating for yesterday (1/14)?" → type: "date_specific", dateFilter: [{date: "2026-01-14"}]
+"Show me January 15" → type: "date_specific", dateFilter: [{date: "2026-01-15"}]
+"entries from Jan 1 to Jan 15" → type: "date_specific", dateFilter: [{start: "2026-01-01", end: "2026-01-15"}]
+"What did I talk about coffee yesterday?" → type: "semantic", searchTerms: "coffee", dateFilter: [{date: "${yesterday}"}]
+"How have I been feeling?" → type: "semantic", searchTerms: "I feel I felt feeling"
+"What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am"
 
 Respond ONLY with JSON:
 {
-  "type": "today|week|month|year|semantic",
-  "searchTerms": "first-person phrases or topic keywords (for semantic searches)",
+  "type": "today|week|month|year|date_specific|semantic",
+  "searchTerms": "topic keywords (only for semantic searches, omit for date_specific)",
   "dateFilter": null or [{date: "YYYY-MM-DD"}] or [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}] or array of multiple ranges
 }`;
 
@@ -238,6 +238,13 @@ function getTranscriptsThisYear() {
 
   const stmt = db.prepare('SELECT * FROM transcripts WHERE created_at >= ? ORDER BY created_at DESC');
   return stmt.all(yearStartTimestamp);
+}
+
+// Helper: Get transcripts by specific date filter (returns ALL matching entries)
+function getTranscriptsByDateFilter(dateFilter) {
+  const stmt = db.prepare('SELECT * FROM transcripts ORDER BY created_at DESC');
+  const allTranscripts = stmt.all();
+  return applyDateFilter(allTranscripts, dateFilter);
 }
 
 // Helper: Parse date filter array and return array of {start, end} timestamp ranges
@@ -452,7 +459,14 @@ bot.on('text', async (ctx) => {
 
     // Build search description message
     let searchDescription = '🔍 ';
-    if (classification.type === 'semantic') {
+    if (classification.type === 'date_specific') {
+      searchDescription += 'Searching notes from ';
+      const dateRanges = parseDateFilter(classification.dateFilter);
+      if (dateRanges && dateRanges.length > 0) {
+        const descriptions = dateRanges.map(r => r.description).join(', ');
+        searchDescription += descriptions;
+      }
+    } else if (classification.type === 'semantic') {
       const searchTerms = classification.searchTerms || userQuery;
       searchDescription += `Searching for: "${searchTerms}"`;
       if (classification.dateFilter) {
@@ -488,6 +502,9 @@ bot.on('text', async (ctx) => {
       relevantTranscripts = getTranscriptsThisMonth();
     } else if (classification.type === 'year') {
       relevantTranscripts = getTranscriptsThisYear();
+    } else if (classification.type === 'date_specific') {
+      // Get ALL transcripts from the specified date(s)/range(s)
+      relevantTranscripts = getTranscriptsByDateFilter(classification.dateFilter);
     } else {
       // Semantic search with optional date filter
       const searchTerms = classification.searchTerms || userQuery;
