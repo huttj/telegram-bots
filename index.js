@@ -124,35 +124,54 @@ bot.use(createAuthMiddleware(AUTHORIZED_USER_ID));
 
 // Helper: Classify query and extract search parameters using small LLM
 async function classifyQuery(userQuery) {
-  const prompt = `Classify this voice journal query. FIRST check if it mentions a time period, THEN consider if it's a semantic search.
+  const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+  const prompt = `Classify this voice journal query and extract date filters. Today's date is ${currentDate}.
 
 User query: "${userQuery}"
 
-STEP 1 - Check for time references (HIGHEST PRIORITY):
+STEP 1 - Check for time references and extract specific dates:
+
+Quick time references:
 - "today" → type: "today"
 - "this week" / "week" → type: "week"
 - "this month" / "month" → type: "month"
 - "this year" / "year" → type: "year"
 
-If ANY time reference is found, use that type. Ignore other words in the query.
+Specific date references (return as dateFilter array):
+- "yesterday" → [{date: "YYYY-MM-DD"}] (calculate yesterday's date)
+- "January 15" / "Jan 15" → [{date: "YYYY-MM-DD"}] (infer current year if not specified)
+- "2026-01-15" / "01/15/2026" → [{date: "2026-01-15"}]
+- "last Monday" / "last week Tuesday" → [{date: "YYYY-MM-DD"}] (calculate the specific date)
+
+Date ranges (return as dateFilter array):
+- "from Jan 1 to Jan 15" → [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}]
+- "between 2026-01-01 and 2026-01-15" → [{start: "2026-01-01", end: "2026-01-15"}]
+- "last week" → [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}] (previous week's start/end)
+- "January" / "January 2026" → [{start: "2026-01-01", end: "2026-02-01"}]
+
+Multiple dates/ranges:
+- "January 15 and January 20" → [{date: "YYYY-MM-DD"}, {date: "YYYY-MM-DD"}]
+- "last Monday and yesterday" → [{date: "YYYY-MM-DD"}, {date: "YYYY-MM-DD"}]
+- "from Jan 1-5 and Jan 10-15" → [{start: "...", end: "..."}, {start: "...", end: "..."}]
 
 STEP 2 - If NO time reference, it's a semantic search:
 - type: "semantic"
 - For introspective/analytical questions (about feelings, personality, patterns, impressions), use first-person phrases that appear in journal entries: "I feel" "I think" "I am" "I want" "I need"
 - For questions about specific topics, use those topic keywords
-- If no clear topic, default to "week" type for recent entries
 
 Examples:
-"What did I say today?" → type: "today"
-"What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am"
-"What did I talk about coffee?" → type: "semantic", searchTerms: "coffee"
-"How have I been feeling?" → type: "semantic", searchTerms: "I feel I felt feeling"
+"What did I say today?" → type: "today", dateFilter: null
+"What did I say yesterday?" → type: "semantic", dateFilter: [{date: "2026-01-15"}]
+"Show me January 15" → type: "semantic", dateFilter: [{date: "2026-01-15"}]
+"entries from Jan 1 to Jan 15" → type: "semantic", dateFilter: [{start: "2026-01-01", end: "2026-01-15"}]
+"What's your impression of me?" → type: "semantic", searchTerms: "I feel I think I am", dateFilter: null
+"What did I talk about coffee last week?" → type: "semantic", searchTerms: "coffee", dateFilter: [{start: "2026-01-05", end: "2026-01-12"}]
 
 Respond ONLY with JSON:
 {
   "type": "today|week|month|year|semantic",
-  "searchTerms": "first-person phrases or topic keywords",
-  "dateFilter": null
+  "searchTerms": "first-person phrases or topic keywords (for semantic searches)",
+  "dateFilter": null or [{date: "YYYY-MM-DD"}] or [{start: "YYYY-MM-DD", end: "YYYY-MM-DD"}] or array of multiple ranges
 }`;
 
   try {
@@ -215,91 +234,67 @@ function getTranscriptsThisYear() {
   return stmt.all(yearStartTimestamp);
 }
 
-// Helper: Parse date filter string and return {start, end} timestamps
+// Helper: Parse date filter array and return array of {start, end} timestamp ranges
 function parseDateFilter(dateFilter) {
   if (!dateFilter) return null;
+  if (!Array.isArray(dateFilter)) return null;
 
-  const now = new Date();
+  const ranges = [];
 
-  // Handle relative date filters
-  if (dateFilter === 'this_year') {
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-    return {
-      start: Math.floor(yearStart.getTime() / 1000),
-      end: null,
-      description: 'this year'
-    };
+  for (const filter of dateFilter) {
+    // Handle specific single date: {date: "YYYY-MM-DD"}
+    if (filter.date) {
+      const date = new Date(filter.date + 'T00:00:00Z');
+      const startOfDay = Math.floor(date.getTime() / 1000);
+      // End of day (23:59:59) - add 86400 seconds (1 day) to get start of next day
+      const endOfDay = startOfDay + 86400;
+      ranges.push({
+        start: startOfDay,
+        end: endOfDay,
+        description: filter.date
+      });
+    }
+    // Handle date range: {start: "YYYY-MM-DD", end: "YYYY-MM-DD"}
+    else if (filter.start && filter.end) {
+      const startDate = new Date(filter.start + 'T00:00:00Z');
+      const endDate = new Date(filter.end + 'T00:00:00Z');
+      const startTimestamp = Math.floor(startDate.getTime() / 1000);
+      // End is inclusive, so add one full day to include the entire end date
+      const endTimestamp = Math.floor(endDate.getTime() / 1000) + 86400;
+      ranges.push({
+        start: startTimestamp,
+        end: endTimestamp,
+        description: `${filter.start} to ${filter.end}`
+      });
+    }
+    // Handle start date only (open-ended range from start date onwards)
+    else if (filter.start) {
+      const startDate = new Date(filter.start + 'T00:00:00Z');
+      const startTimestamp = Math.floor(startDate.getTime() / 1000);
+      ranges.push({
+        start: startTimestamp,
+        end: null, // null means no end limit
+        description: `from ${filter.start}`
+      });
+    }
   }
 
-  if (dateFilter === 'this_month') {
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    return {
-      start: Math.floor(monthStart.getTime() / 1000),
-      end: null,
-      description: 'this month'
-    };
-  }
-
-  if (dateFilter === 'this_week') {
-    const weekStart = new Date(now);
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-    weekStart.setHours(0, 0, 0, 0);
-    return {
-      start: Math.floor(weekStart.getTime() / 1000),
-      end: null,
-      description: 'this week'
-    };
-  }
-
-  if (dateFilter === 'last_year') {
-    const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
-    const lastYearEnd = new Date(now.getFullYear(), 0, 1);
-    return {
-      start: Math.floor(lastYearStart.getTime() / 1000),
-      end: Math.floor(lastYearEnd.getTime() / 1000),
-      description: 'last year'
-    };
-  }
-
-  // Handle year range like "2022-2025"
-  const rangeMatch = dateFilter.match(/^(\d{4})-(\d{4})$/);
-  if (rangeMatch) {
-    const startYear = parseInt(rangeMatch[1]);
-    const endYear = parseInt(rangeMatch[2]);
-    const rangeStart = new Date(startYear, 0, 1);
-    const rangeEnd = new Date(endYear + 1, 0, 1);
-    return {
-      start: Math.floor(rangeStart.getTime() / 1000),
-      end: Math.floor(rangeEnd.getTime() / 1000),
-      description: `${startYear}-${endYear}`
-    };
-  }
-
-  // Handle single year like "2024"
-  const yearMatch = dateFilter.match(/^(\d{4})$/);
-  if (yearMatch) {
-    const year = parseInt(yearMatch[1]);
-    const yearStart = new Date(year, 0, 1);
-    const yearEnd = new Date(year + 1, 0, 1);
-    return {
-      start: Math.floor(yearStart.getTime() / 1000),
-      end: Math.floor(yearEnd.getTime() / 1000),
-      description: year.toString()
-    };
-  }
-
-  return null;
+  return ranges.length > 0 ? ranges : null;
 }
 
-// Helper: Apply date filter to transcripts
+// Helper: Apply date filter to transcripts (supports multiple date ranges)
 function applyDateFilter(transcripts, dateFilter) {
-  const filter = parseDateFilter(dateFilter);
-  if (!filter) return transcripts;
+  const ranges = parseDateFilter(dateFilter);
+  if (!ranges) return transcripts;
 
   return transcripts.filter(t => {
-    if (filter.start && t.created_at < filter.start) return false;
-    if (filter.end && t.created_at >= filter.end) return false;
-    return true;
+    // Check if transcript matches ANY of the date ranges
+    return ranges.some(range => {
+      // Check if created_at is within this range
+      if (range.start && t.created_at < range.start) return false;
+      if (range.end && t.created_at >= range.end) return false;
+      return true;
+    });
   });
 }
 
@@ -455,9 +450,10 @@ bot.on('text', async (ctx) => {
       const searchTerms = classification.searchTerms || userQuery;
       searchDescription += `Searching for: "${searchTerms}"`;
       if (classification.dateFilter) {
-        const dateInfo = parseDateFilter(classification.dateFilter);
-        if (dateInfo) {
-          searchDescription += ` (${dateInfo.description})`;
+        const dateRanges = parseDateFilter(classification.dateFilter);
+        if (dateRanges && dateRanges.length > 0) {
+          const descriptions = dateRanges.map(r => r.description).join(', ');
+          searchDescription += ` (${descriptions})`;
         }
       } else {
         searchDescription += ' (all time)';
